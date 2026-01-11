@@ -222,7 +222,7 @@ def pec_product_filter(sim: NoisySimulator, circuit: Circuit, obs: str,
     
     return PECResult(
         estimate=gamma * raw_estimates.mean(),
-        gamma=gamma,
+        gamma=float(gamma),
         raw_variance=raw_estimates.var(),
         time=time.time() - t0
     )
