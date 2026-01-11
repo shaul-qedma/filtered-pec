@@ -2,7 +2,6 @@
 
 import numpy as np
 from dataclasses import dataclass
-from itertools import product as cartesian
 
 ETA = np.array([[+1,+1,+1,+1], [+1,+1,-1,-1], [+1,-1,+1,-1], [+1,-1,-1,+1]], dtype=np.float64)
 
@@ -15,8 +14,14 @@ PAULI = [
 
 STANDARD_GATES = {
     "CNOT": np.array([[1,0,0,0], [0,1,0,0], [0,0,0,1], [0,0,1,0]], dtype=complex),
+    # Control on the second qubit (q1), target on the first (q0).
+    "CNOT_R": np.array([[1,0,0,0], [0,0,0,1], [0,0,1,0], [0,1,0,0]], dtype=complex),
     "CZ": np.diag([1, 1, 1, -1]).astype(complex),
+    "SWAP": np.array([[1,0,0,0], [0,0,1,0], [0,1,0,0], [0,0,0,1]], dtype=complex),
 }
+
+# Finite bank of two-qubit Clifford gates for random circuit sampling.
+CLIFFORD_2Q_GATES = ("CNOT", "CNOT_R", "CZ", "SWAP")
 
 @dataclass
 class Gate:
@@ -116,22 +121,42 @@ def error_locations(circuit, noise_model):
                 locs.append((l, gate.qubits[1], kraus_to_probs(kraus2)))
     return locs
 
-def random_circuit(n_qubits, depth, rng):
+def haar_random_1q(rng):
+    """Haar-random single-qubit unitary."""
+    z = rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2))
+    q, r = np.linalg.qr(z)
+    d = np.diag(r)
+    phases = d / np.abs(d)
+    return q * phases
+
+def random_circuit(n_qubits, depth, rng, twoq_gate_names=None):
+    """
+    Brickwall circuit:
+      - Even layers: Haar-random 1q gates on all qubits
+      - Layers 1 mod 4: 2q gates on (0,1), (2,3), ...
+      - Layers 3 mod 4: 2q gates on (1,2), (3,4), ...
+    """
+    if twoq_gate_names is None:
+        twoq_gate_names = CLIFFORD_2Q_GATES
+
     layers = []
-    for _ in range(depth):
+    for l in range(depth):
         layer = []
-        available = list(range(n_qubits))
-        rng.shuffle(available)
-        while len(available) >= 2:
-            q1, q2 = available.pop(), available.pop()
-            layer.append(Gate((q1, q2), rng.choice(["CNOT", "CZ"])))
-        if layer:
-            layers.append(layer)
+        if l % 2 == 0:
+            for q in range(n_qubits):
+                layer.append(Gate((q,), haar_random_1q(rng)))
+        else:
+            start = 0 if (l % 4 == 1) else 1
+            for q in range(start, n_qubits - 1, 2):
+                layer.append(Gate((q, q + 1), rng.choice(twoq_gate_names)))
+        layers.append(layer)
     return Circuit(n_qubits, layers)
 
-def random_noise_model(rng, p_I_range=(0.85, 0.95)):
+def random_noise_model(rng, p_I_range=(0.85, 0.95), gate_names=None):
+    if gate_names is None:
+        gate_names = CLIFFORD_2Q_GATES
     noise = {}
-    for gate in ["CNOT", "CZ"]:
+    for gate in gate_names:
         kraus = []
         for _ in range(2):
             p_I = rng.uniform(*p_I_range)
