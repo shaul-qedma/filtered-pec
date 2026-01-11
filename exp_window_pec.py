@@ -143,6 +143,183 @@ def pec_estimate(
 
 
 # =============================================================================
+# QISKIT INTEGRATION
+# =============================================================================
+
+def _require_qiskit():
+    try:
+        from qiskit import QuantumCircuit
+        from qiskit.circuit.library import UnitaryGate
+        from qiskit.quantum_info import Pauli, DensityMatrix, Kraus
+        from qiskit_aer import AerSimulator
+    except Exception as exc:
+        raise ImportError(
+            "Qiskit and qiskit-aer are required for Qiskit simulation."
+        ) from exc
+    return QuantumCircuit, UnitaryGate, Pauli, DensityMatrix, Kraus, AerSimulator
+
+
+def _to_qiskit_statevector(state: np.ndarray, n_qubits: int) -> np.ndarray:
+    if n_qubits <= 1:
+        return state.copy()
+    reshaped = state.reshape([2] * n_qubits)
+    return reshaped.transpose(list(reversed(range(n_qubits)))).reshape(-1)
+
+
+def _qiskit_noise_instructions(noise: dict, Kraus):
+    instr_map = {}
+    for gate_name, (kraus1, kraus2) in noise.items():
+        instr_map[gate_name] = (
+            Kraus(list(kraus1)).to_instruction(),
+            Kraus(list(kraus2)).to_instruction(),
+        )
+    return instr_map
+
+
+def _build_qiskit_circuit(
+    circuit: Circuit,
+    init_density,
+    noise_instr: dict,
+    insertions: dict,
+    QuantumCircuit,
+    UnitaryGate,
+):
+    n = circuit.n_qubits
+    qc = QuantumCircuit(n)
+    qc.set_density_matrix(init_density)
+
+    for l, layer in enumerate(circuit.layers):
+        for gate in layer:
+            if isinstance(gate.content, np.ndarray):
+                qc.append(UnitaryGate(gate.content), [gate.qubits[0]])
+                continue
+
+            name = gate.content
+            q0, q1 = gate.qubits
+            if name == "CNOT":
+                qc.cx(q0, q1)
+            elif name == "CNOT_R":
+                qc.cx(q1, q0)
+            elif name == "CZ":
+                qc.cz(q0, q1)
+            elif name == "SWAP":
+                qc.swap(q0, q1)
+            else:
+                raise ValueError(f"Unsupported 2q gate: {name}")
+
+            if name in noise_instr:
+                instr1, instr2 = noise_instr[name]
+                qc.append(instr1, [q0])
+                qc.append(instr2, [q1])
+
+                if insertions:
+                    for q in (q0, q1):
+                        s = insertions.get((l, q))
+                        if s is None or s == 0:
+                            continue
+                        if s == 1:
+                            qc.x(q)
+                        elif s == 2:
+                            qc.y(q)
+                        elif s == 3:
+                            qc.z(q)
+                        else:
+                            raise ValueError(f"Bad Pauli index: {s}")
+
+    return qc
+
+
+def noisy_expectation_qiskit(
+    circuit: Circuit,
+    observable: str,
+    initial_state: np.ndarray,
+    noise: dict,
+) -> float:
+    """
+    Noisy expectation value using Qiskit simulation (no PEC insertions).
+    """
+    QuantumCircuit, UnitaryGate, Pauli, DensityMatrix, Kraus, AerSimulator = _require_qiskit()
+
+    init_state = _to_qiskit_statevector(initial_state, circuit.n_qubits)
+    init_density = DensityMatrix(init_state)
+    pauli_obs = Pauli(observable[::-1])
+    noise_instr = _qiskit_noise_instructions(noise, Kraus)
+    backend = AerSimulator(method="density_matrix")
+
+    qc = _build_qiskit_circuit(
+        circuit=circuit,
+        init_density=init_density,
+        noise_instr=noise_instr,
+        insertions={},
+        QuantumCircuit=QuantumCircuit,
+        UnitaryGate=UnitaryGate,
+    )
+    qc.save_density_matrix()
+
+    result = backend.run(qc).result()
+    rho = result.data(0)["density_matrix"]
+    dm = DensityMatrix(rho)
+    return float(np.real(dm.expectation_value(pauli_obs)))
+
+
+def pec_estimate_qiskit(
+    circuit: Circuit,
+    observable: str,
+    initial_state: np.ndarray,
+    noise: dict,
+    error_locs: List[Tuple],
+    beta: float,
+    n_samples: int,
+    seed: int = 0
+) -> PECEstimate:
+    """
+    PEC estimation with exponential window filter using Qiskit simulation.
+    """
+    QuantumCircuit, UnitaryGate, Pauli, DensityMatrix, Kraus, AerSimulator = _require_qiskit()
+
+    rng = np.random.default_rng(seed)
+    local_q = [exp_window_quasi_prob(p, beta) for (_, _, p) in error_locs]
+    local_gamma = [gamma(q) for q in local_q]
+    total_gamma = np.prod(local_gamma)
+    sampling_probs = [np.abs(q) / g for q, g in zip(local_q, local_gamma)]
+    sampling_signs = [np.sign(q) for q in local_q]
+
+    init_state = _to_qiskit_statevector(initial_state, circuit.n_qubits)
+    init_density = DensityMatrix(init_state)
+    pauli_obs = Pauli(observable[::-1])
+    noise_instr = _qiskit_noise_instructions(noise, Kraus)
+    backend = AerSimulator(method="density_matrix")
+
+    estimates = np.empty(n_samples)
+    for i in range(n_samples):
+        insertions = {}
+        sign = 1.0
+        for v, (layer, qubit, _) in enumerate(error_locs):
+            s = rng.choice(4, p=sampling_probs[v])
+            insertions[(layer, qubit)] = s
+            sign *= sampling_signs[v][s]
+
+        qc = _build_qiskit_circuit(
+            circuit=circuit,
+            init_density=init_density,
+            noise_instr=noise_instr,
+            insertions=insertions,
+            QuantumCircuit=QuantumCircuit,
+            UnitaryGate=UnitaryGate,
+        )
+        qc.save_density_matrix()
+
+        result = backend.run(qc).result()
+        rho = result.data(0)["density_matrix"]
+        dm = DensityMatrix(rho)
+        estimates[i] = sign * np.real(dm.expectation_value(pauli_obs))
+
+    mean = total_gamma * estimates.mean()
+    std = total_gamma * estimates.std() / np.sqrt(n_samples)
+    return PECEstimate(mean=mean, std=std, gamma=float(total_gamma), n_samples=n_samples)
+
+
+# =============================================================================
 # VERIFICATION
 # =============================================================================
 

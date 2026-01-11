@@ -126,7 +126,9 @@ def haar_random_1q(rng):
     z = rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2))
     q, r = np.linalg.qr(z)
     d = np.diag(r)
-    phases = d / np.abs(d)
+    phases = np.ones_like(d)
+    nonzero = np.abs(d) > 0
+    phases[nonzero] = d[nonzero] / np.abs(d[nonzero])
     return q * phases
 
 def random_circuit(n_qubits, depth, rng, twoq_gate_names=None):
@@ -152,14 +154,30 @@ def random_circuit(n_qubits, depth, rng, twoq_gate_names=None):
         layers.append(layer)
     return Circuit(n_qubits, layers)
 
-def random_noise_model(rng, p_I_range=(0.85, 0.95), gate_names=None):
+def random_noise_model(rng, p_I_range=(0.85, 0.95), gate_names=None) -> dict[str, tuple]:
+    """
+    Random per-gate Pauli noise model.
+
+    Args:
+        p_I_range: tuple (low, high) or dict mapping gate name to (low, high).
+            If dict, a "default" key can provide a fallback range.
+        gate_names: iterable of gate names to include.
+    """
     if gate_names is None:
         gate_names = CLIFFORD_2Q_GATES
+
+    if isinstance(p_I_range, dict):
+        default_range = p_I_range.get("default", (0.85, 0.95))
+        p_I_ranges = {gate: p_I_range.get(gate, default_range) for gate in gate_names}
+    else:
+        p_I_ranges = {gate: p_I_range for gate in gate_names}
+
     noise = {}
     for gate in gate_names:
+        p_I_low, p_I_high = p_I_ranges[gate]
         kraus = []
         for _ in range(2):
-            p_I = rng.uniform(*p_I_range)
+            p_I = rng.uniform(p_I_low, p_I_high)
             rest = 1 - p_I
             p_X = rng.uniform(0, rest)
             p_Y = rng.uniform(0, rest - p_X)

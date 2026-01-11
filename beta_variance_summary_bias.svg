@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="290">
+<rect width="940" height="290" fill="#ffffff"/>
+<text x="470.0" y="28" text-anchor="middle" font-family="Arial" font-size="18" fill="#222">Summary (n_samples=40, n_trials=12, noise=gate)</text>
+<rect x="60" y="50" width="260" height="200" fill="none" stroke="#e0e0e0"/>
+<line x1="100" y1="220" x2="310" y2="220" stroke="#222"/>
+<line x1="100" y1="70" x2="100" y2="220" stroke="#222"/>
+<line x1="100.0" y1="220" x2="100.0" y2="224" stroke="#222"/>
+<text x="100.0" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">-0.02</text>
+<line x1="152.5" y1="220" x2="152.5" y2="224" stroke="#222"/>
+<text x="152.5" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.04</text>
+<line x1="205.0" y1="220" x2="205.0" y2="224" stroke="#222"/>
+<text x="205.0" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.10</text>
+<line x1="257.5" y1="220" x2="257.5" y2="224" stroke="#222"/>
+<text x="257.5" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.16</text>
+<line x1="310.0" y1="220" x2="310.0" y2="224" stroke="#222"/>
+<text x="310.0" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.22</text>
+<line x1="96" y1="220.0" x2="100" y2="220.0" stroke="#222"/>
+<text x="94" y="223.0" text-anchor="end" font-family="Arial" font-size="10" fill="#222">-0.070</text>
+<line x1="96" y1="182.5" x2="100" y2="182.5" stroke="#222"/>
+<text x="94" y="185.5" text-anchor="end" font-family="Arial" font-size="10" fill="#222">-0.039</text>
+<line x1="96" y1="145.0" x2="100" y2="145.0" stroke="#222"/>
+<text x="94" y="148.0" text-anchor="end" font-family="Arial" font-size="10" fill="#222">-0.008</text>
+<line x1="96" y1="107.5" x2="100" y2="107.5" stroke="#222"/>
+<text x="94" y="110.5" text-anchor="end" font-family="Arial" font-size="10" fill="#222">0.023</text>
+<line x1="96" y1="70.0" x2="100" y2="70.0" stroke="#222"/>
+<text x="94" y="73.0" text-anchor="end" font-family="Arial" font-size="10" fill="#222">0.054</text>
+<text x="68" y="64" text-anchor="start" font-family="Arial" font-size="12" fill="#222">3q d4</text>
+<text x="205.0" y="244" text-anchor="middle" font-family="Arial" font-size="11" fill="#222">beta</text>
+<text x="70" y="145.0" text-anchor="middle" font-family="Arial" font-size="11" fill="#222" transform="rotate(-90 70 145.0)">Mean bias</text>
+<polyline points="117.5,128.4 161.2,159.0 205.0,174.4 292.5,177.4" fill="none" stroke="#1b9e77" stroke-width="1.5"/>
+<circle cx="117.5" cy="128.4" r="3.5" fill="#1b9e77"/>
+<circle cx="161.2" cy="159.0" r="3.5" fill="#1b9e77"/>
+<circle cx="205.0" cy="174.4" r="3.5" fill="#1b9e77"/>
+<circle cx="292.5" cy="177.4" r="3.5" fill="#1b9e77"/>
+<rect x="360" y="50" width="260" height="200" fill="none" stroke="#e0e0e0"/>
+<line x1="400" y1="220" x2="610" y2="220" stroke="#222"/>
+<line x1="400" y1="70" x2="400" y2="220" stroke="#222"/>
+<line x1="400.0" y1="220" x2="400.0" y2="224" stroke="#222"/>
+<text x="400.0" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">-0.02</text>
+<line x1="452.5" y1="220" x2="452.5" y2="224" stroke="#222"/>
+<text x="452.5" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.04</text>
+<line x1="505.0" y1="220" x2="505.0" y2="224" stroke="#222"/>
+<text x="505.0" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.10</text>
+<line x1="557.5" y1="220" x2="557.5" y2="224" stroke="#222"/>
+<text x="557.5" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.16</text>
+<line x1="610.0" y1="220" x2="610.0" y2="224" stroke="#222"/>
+<text x="610.0" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.22</text>
+<line x1="396" y1="220.0" x2="400" y2="220.0" stroke="#222"/>
+<line x1="396" y1="182.5" x2="400" y2="182.5" stroke="#222"/>
+<line x1="396" y1="145.0" x2="400" y2="145.0" stroke="#222"/>
+<line x1="396" y1="107.5" x2="400" y2="107.5" stroke="#222"/>
+<line x1="396" y1="70.0" x2="400" y2="70.0" stroke="#222"/>
+<text x="368" y="64" text-anchor="start" font-family="Arial" font-size="12" fill="#222">4q d4</text>
+<text x="505.0" y="244" text-anchor="middle" font-family="Arial" font-size="11" fill="#222">beta</text>
+<polyline points="417.5,102.1 461.2,138.2 505.0,114.2 592.5,144.5" fill="none" stroke="#d95f02" stroke-width="1.5"/>
+<circle cx="417.5" cy="102.1" r="3.5" fill="#d95f02"/>
+<circle cx="461.2" cy="138.2" r="3.5" fill="#d95f02"/>
+<circle cx="505.0" cy="114.2" r="3.5" fill="#d95f02"/>
+<circle cx="592.5" cy="144.5" r="3.5" fill="#d95f02"/>
+<rect x="660" y="50" width="260" height="200" fill="none" stroke="#e0e0e0"/>
+<line x1="700" y1="220" x2="910" y2="220" stroke="#222"/>
+<line x1="700" y1="70" x2="700" y2="220" stroke="#222"/>
+<line x1="700.0" y1="220" x2="700.0" y2="224" stroke="#222"/>
+<text x="700.0" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">-0.02</text>
+<line x1="752.5" y1="220" x2="752.5" y2="224" stroke="#222"/>
+<text x="752.5" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.04</text>
+<line x1="805.0" y1="220" x2="805.0" y2="224" stroke="#222"/>
+<text x="805.0" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.10</text>
+<line x1="857.5" y1="220" x2="857.5" y2="224" stroke="#222"/>
+<text x="857.5" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.16</text>
+<line x1="910.0" y1="220" x2="910.0" y2="224" stroke="#222"/>
+<text x="910.0" y="236" text-anchor="middle" font-family="Arial" font-size="10" fill="#222">0.22</text>
+<line x1="696" y1="220.0" x2="700" y2="220.0" stroke="#222"/>
+<line x1="696" y1="182.5" x2="700" y2="182.5" stroke="#222"/>
+<line x1="696" y1="145.0" x2="700" y2="145.0" stroke="#222"/>
+<line x1="696" y1="107.5" x2="700" y2="107.5" stroke="#222"/>
+<line x1="696" y1="70.0" x2="700" y2="70.0" stroke="#222"/>
+<text x="668" y="64" text-anchor="start" font-family="Arial" font-size="12" fill="#222">5q d4</text>
+<text x="805.0" y="244" text-anchor="middle" font-family="Arial" font-size="11" fill="#222">beta</text>
+<polyline points="717.5,205.5 761.2,87.3 805.0,146.0 892.5,84.5" fill="none" stroke="#7570b3" stroke-width="1.5"/>
+<circle cx="717.5" cy="205.5" r="3.5" fill="#7570b3"/>
+<circle cx="761.2" cy="87.3" r="3.5" fill="#7570b3"/>
+<circle cx="805.0" cy="146.0" r="3.5" fill="#7570b3"/>
+<circle cx="892.5" cy="84.5" r="3.5" fill="#7570b3"/>
+</svg>
