@@ -26,7 +26,6 @@ from rich import box
 from rich.console import Console
 from rich.table import Table
 
-DIRECT_STATEVECTOR_QUBITS_MAX = 1
 QISKIT_METHOD = "statevector"
 DEFAULT_QISKIT_BATCH_SIZE = 10
 console = Console()
@@ -174,7 +173,7 @@ def _require_qiskit():
 
 
 def _to_qiskit_statevector(state: np.ndarray, n_qubits: int) -> np.ndarray:
-    if n_qubits <= DIRECT_STATEVECTOR_QUBITS_MAX:
+    if n_qubits <= 1:
         return state.copy()
     reshaped = state.reshape([2] * n_qubits)
     return reshaped.transpose(list(reversed(range(n_qubits)))).reshape(-1)

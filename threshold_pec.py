@@ -17,6 +17,7 @@ This keeps product sampling but applies a non-product target filter.
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
@@ -26,6 +27,7 @@ import numpy as np
 from rich import box
 from rich.console import Console
 from rich.table import Table
+from tqdm import tqdm
 
 from exp_window_pec import (
     exp_window_quasi_prob,
@@ -414,124 +416,131 @@ def benchmark(
     ideals = [trial.ideal for trial in trials]
 
     w0_values = []
-    for t, trial in enumerate(trials):
-        if progress:
-            console.print(f"  Trial {t + 1}/{len(trials)}")
-        circuit = trial.circuit
-        noise = trial.noise
-        init = trial.initial_state
-        obs = trial.observable
-        locs = trial.error_locs
-        ideal = trial.ideal
-        w0_values.append(_resolve_w0(w0_density, len(locs)))
+    show_progress = progress and sys.stderr.isatty()
+    with tqdm(
+        trials,
+        desc="Trials",
+        unit="trial",
+        dynamic_ncols=True,
+        leave=False,
+        disable=not show_progress,
+    ) as trial_bar:
+        for t, trial in enumerate(trial_bar):
+            circuit = trial.circuit
+            noise = trial.noise
+            init = trial.initial_state
+            obs = trial.observable
+            locs = trial.error_locs
+            ideal = trial.ideal
+            w0_values.append(_resolve_w0(w0_density, len(locs)))
 
-        if use_qiskit:
-            est_full = None
-            est_exp = None
-            est_filtered = None
-            if compute_full:
-                est_full = pec_estimate_qiskit(
-                    circuit,
-                    obs,
-                    init,
-                    noise,
-                    locs,
-                    beta=0.0,
-                    n_samples=n_samples,
-                    seed=seed + SEED_OFFSET_FULL * t,
-                    batch_size=qiskit_batch_size,
-                )
-            if compute_exp:
-                est_exp = pec_estimate_qiskit(
-                    circuit,
-                    obs,
-                    init,
-                    noise,
-                    locs,
-                    beta=beta_prop,
-                    n_samples=n_samples,
-                    seed=seed + SEED_OFFSET_EXP * t,
-                    batch_size=qiskit_batch_size,
-                )
-            if compute_filtered:
-                est_filtered = threshold_pec_qiskit(
-                    circuit,
-                    obs,
-                    init,
-                    noise,
-                    locs,
-                    beta_prop=beta_prop,
-                    beta_thresh=beta_thresh,
-                    n_samples=n_samples,
-                    seed=seed + SEED_OFFSET_FILTERED * t,
-                    filter_type=filter_type,
-                    softplus_tau=softplus_tau,
-                    w0_density=w0_density,
-                    batch_size=qiskit_batch_size,
-                )
-        else:
-            sim = trial.sim
-            est_full = None
-            est_exp = None
-            est_filtered = None
-            if compute_full:
-                est_full = pec_estimate(
-                    sim,
-                    circuit,
-                    obs,
-                    init,
-                    locs,
-                    beta=0.0,
-                    n_samples=n_samples,
-                    seed=seed + SEED_OFFSET_FULL * t,
-                )
-            if compute_exp:
-                est_exp = pec_estimate(
-                    sim,
-                    circuit,
-                    obs,
-                    init,
-                    locs,
-                    beta=beta_prop,
-                    n_samples=n_samples,
-                    seed=seed + SEED_OFFSET_EXP * t,
-                )
-            if compute_filtered:
-                est_filtered = threshold_pec_estimate(
-                    sim,
-                    circuit,
-                    obs,
-                    init,
-                    locs,
-                    beta_prop=beta_prop,
-                    beta_thresh=beta_thresh,
-                    n_samples=n_samples,
-                    seed=seed + SEED_OFFSET_FILTERED * t,
-                    filter_type=filter_type,
-                    softplus_tau=softplus_tau,
-                    w0_density=w0_density,
-                )
+            if use_qiskit:
+                est_full = None
+                est_exp = None
+                est_filtered = None
+                if compute_full:
+                    est_full = pec_estimate_qiskit(
+                        circuit,
+                        obs,
+                        init,
+                        noise,
+                        locs,
+                        beta=0.0,
+                        n_samples=n_samples,
+                        seed=seed + SEED_OFFSET_FULL * t,
+                        batch_size=qiskit_batch_size,
+                    )
+                if compute_exp:
+                    est_exp = pec_estimate_qiskit(
+                        circuit,
+                        obs,
+                        init,
+                        noise,
+                        locs,
+                        beta=beta_prop,
+                        n_samples=n_samples,
+                        seed=seed + SEED_OFFSET_EXP * t,
+                        batch_size=qiskit_batch_size,
+                    )
+                if compute_filtered:
+                    est_filtered = threshold_pec_qiskit(
+                        circuit,
+                        obs,
+                        init,
+                        noise,
+                        locs,
+                        beta_prop=beta_prop,
+                        beta_thresh=beta_thresh,
+                        n_samples=n_samples,
+                        seed=seed + SEED_OFFSET_FILTERED * t,
+                        filter_type=filter_type,
+                        softplus_tau=softplus_tau,
+                        w0_density=w0_density,
+                        batch_size=qiskit_batch_size,
+                    )
+            else:
+                sim = trial.sim
+                est_full = None
+                est_exp = None
+                est_filtered = None
+                if compute_full:
+                    est_full = pec_estimate(
+                        sim,
+                        circuit,
+                        obs,
+                        init,
+                        locs,
+                        beta=0.0,
+                        n_samples=n_samples,
+                        seed=seed + SEED_OFFSET_FULL * t,
+                    )
+                if compute_exp:
+                    est_exp = pec_estimate(
+                        sim,
+                        circuit,
+                        obs,
+                        init,
+                        locs,
+                        beta=beta_prop,
+                        n_samples=n_samples,
+                        seed=seed + SEED_OFFSET_EXP * t,
+                    )
+                if compute_filtered:
+                    est_filtered = threshold_pec_estimate(
+                        sim,
+                        circuit,
+                        obs,
+                        init,
+                        locs,
+                        beta_prop=beta_prop,
+                        beta_thresh=beta_thresh,
+                        n_samples=n_samples,
+                        seed=seed + SEED_OFFSET_FILTERED * t,
+                        filter_type=filter_type,
+                        softplus_tau=softplus_tau,
+                        w0_density=w0_density,
+                    )
 
-        if compute_full and est_full is not None:
-            results["full_pec"].append(
-                {"estimate": est_full.mean, "qp_norm": est_full.qp_norm, "error": est_full.mean - ideal}
-            )
-        if compute_exp and est_exp is not None:
-            results["exp_window"].append(
-                {"estimate": est_exp.mean, "qp_norm": est_exp.qp_norm, "error": est_exp.mean - ideal}
-            )
-        if compute_filtered and est_filtered is not None:
-            results["filtered"].append(
-                {
-                    "estimate": est_filtered.mean,
-                    "qp_norm": est_filtered.qp_norm_proposal,
-                    "ess": est_filtered.effective_samples,
-                    "above": est_filtered.weight_above_frac,
-                    "weight_mean": est_filtered.weight_mean,
-                    "weight_std": est_filtered.weight_std,
-                    "error": est_filtered.mean - ideal,
-                }
-            )
+            if compute_full and est_full is not None:
+                results["full_pec"].append(
+                    {"estimate": est_full.mean, "qp_norm": est_full.qp_norm, "error": est_full.mean - ideal}
+                )
+            if compute_exp and est_exp is not None:
+                results["exp_window"].append(
+                    {"estimate": est_exp.mean, "qp_norm": est_exp.qp_norm, "error": est_exp.mean - ideal}
+                )
+            if compute_filtered and est_filtered is not None:
+                results["filtered"].append(
+                    {
+                        "estimate": est_filtered.mean,
+                        "qp_norm": est_filtered.qp_norm_proposal,
+                        "ess": est_filtered.effective_samples,
+                        "above": est_filtered.weight_above_frac,
+                        "weight_mean": est_filtered.weight_mean,
+                        "weight_std": est_filtered.weight_std,
+                        "error": est_filtered.mean - ideal,
+                    }
+                )
 
     return {
         "results": results,
