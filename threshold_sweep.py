@@ -23,27 +23,8 @@ from exp_window_pec import DEFAULT_QISKIT_BATCH_SIZE
 from threshold_pec import benchmark, generate_trials, TrialData
 
 console = Console()
-DEFAULT_QUBITS = [4, 5, 6, 7, 8]
-DEFAULT_DEPTHS = [6, 8, 10, 12, 14]
-DEFAULT_MIN_VOLUME = 24
-DEFAULT_MAX_VOLUME = 64
-DEFAULT_RATIOS = [0.75, 1.0, 1.5, 2.0]
-DEFAULT_CONFIGS_PER_RATIO = 2
-DEFAULT_MAX_CONFIGS = 0
-DEFAULT_N_SAMPLES = 500
-DEFAULT_N_TRIALS = 12
-DEFAULT_SEED = 42
-DEFAULT_W0_DENSITIES = [0.30, 0.40, 0.50, 0.60]
-DEFAULT_BETA_PROPS = [0.10, 0.15, 0.20]
-DEFAULT_BETA_THRESHES = [0.10, 0.15, 0.20, 0.25]
-DEFAULT_SOFTPLUS_TAUS = [0.5, 1.0, 2.0]
 DEFAULT_SOFTPLUS_TAU = 1.0
 DEFAULT_CONFIG_SEED_OFFSET = 1000
-DEFAULT_PROFILE_OUT = "threshold_sweep.prof"
-DEFAULT_PROFILE_TOP = 30
-DEFAULT_PROFILE_SORT = "cumulative"
-DEFAULT_AUTOTUNE_SAMPLES = 200
-DEFAULT_AUTOTUNE_CANDIDATES = [4, 8, 16, 32, 64]
 
 _BATCH_SIZE_CACHE: Dict[Tuple[int, int], int] = {}
 
@@ -55,16 +36,18 @@ def _load_config(path: str) -> dict:
     return data
 
 
-def _require_list(data: dict, key: str, default: List) -> List:
-    value = data.get(key, default)
+def _require_list(data: dict, key: str) -> List:
+    value = data[key]
     if not isinstance(value, list):
         raise ValueError(f"Config field '{key}' must be a list.")
     return value
 
 
 def _resolve_configs(config: dict) -> List[Tuple[int, int]]:
-    raw_configs = config.get("configs")
-    if raw_configs:
+    if "configs" in config:
+        raw_configs = _require_list(config, "configs")
+        if not raw_configs:
+            raise ValueError("configs must be a non-empty list.")
         resolved: List[Tuple[int, int]] = []
         for item in raw_configs:
             if isinstance(item, dict):
@@ -77,17 +60,17 @@ def _resolve_configs(config: dict) -> List[Tuple[int, int]]:
             resolved.append((int(n_qubits), int(depth)))
         return resolved
 
-    auto = config.get("auto_configs")
-    if auto:
+    if "auto_configs" in config:
+        auto = config["auto_configs"]
         if not isinstance(auto, dict):
             raise ValueError("auto_configs must be a mapping.")
-        qubits = _require_list(auto, "qubits", DEFAULT_QUBITS)
-        depths = _require_list(auto, "depths", DEFAULT_DEPTHS)
-        ratios = _require_list(auto, "ratios", DEFAULT_RATIOS)
-        min_volume = int(auto.get("min_volume", DEFAULT_MIN_VOLUME))
-        max_volume = int(auto.get("max_volume", DEFAULT_MAX_VOLUME))
-        per_ratio = int(auto.get("per_ratio", DEFAULT_CONFIGS_PER_RATIO))
-        max_configs = int(auto.get("max_configs", DEFAULT_MAX_CONFIGS))
+        qubits = _require_list(auto, "qubits")
+        depths = _require_list(auto, "depths")
+        ratios = _require_list(auto, "ratios")
+        min_volume = int(auto["min_volume"])
+        max_volume = int(auto["max_volume"])
+        per_ratio = int(auto["per_ratio"])
+        max_configs = int(auto["max_configs"])
         return auto_configs(
             qubits=qubits,
             depths=depths,
@@ -169,21 +152,20 @@ def auto_configs(
 
 
 def _summary_from_filtered(results: List[dict]) -> dict:
+    if not results:
+        raise ValueError("Filtered results are empty.")
     errors = np.array([d["error"] for d in results], dtype=float)
     qp_norms = np.array([d["qp_norm"] for d in results], dtype=float)
-    ess_vals = [float(val) for val in (d.get("ess") for d in results) if val is not None]
-    ess = float(np.mean(ess_vals)) if ess_vals else float("nan")
-    above_vals = [float(val) for val in (d.get("above") for d in results) if val is not None]
-    above = float(np.mean(above_vals)) if above_vals else float("nan")
-    weight_vals = [float(val) for val in (d.get("weight_mean") for d in results) if val is not None]
-    weight_mean = float(np.mean(weight_vals)) if weight_vals else float("nan")
+    ess_vals = np.array([d["ess"] for d in results], dtype=float)
+    above_vals = np.array([d["above"] for d in results], dtype=float)
+    weight_vals = np.array([d["weight_mean"] for d in results], dtype=float)
     return {
         "bias": float(np.mean(errors)),
         "rmse": float(np.sqrt(np.mean(errors**2))),
         "qp_norm": float(np.mean(qp_norms)),
-        "ess": ess,
-        "above": above,
-        "weight_mean": weight_mean,
+        "ess": float(np.mean(ess_vals)),
+        "above": float(np.mean(above_vals)),
+        "weight_mean": float(np.mean(weight_vals)),
     }
 
 
@@ -211,6 +193,9 @@ def _autotune_qiskit_batch_size(
     w0_density: float,
     candidates: List[int],
     tune_samples: int,
+    tune_trials: int,
+    warmup_repeats: int,
+    timed_repeats: int,
 ) -> int:
     key = (n_qubits, depth)
     if key in _BATCH_SIZE_CACHE:
@@ -218,39 +203,72 @@ def _autotune_qiskit_batch_size(
 
     if not trials:
         raise ValueError("No trials available for batch-size autotune.")
+    if not candidates:
+        raise ValueError("autotune_candidates must be a non-empty list.")
+    if tune_trials < 1:
+        raise ValueError("autotune_trials must be at least 1.")
+    if warmup_repeats < 0:
+        raise ValueError("autotune_warmup must be >= 0.")
+    if timed_repeats < 1:
+        raise ValueError("autotune_repeats must be at least 1.")
 
     tune_samples = max(1, min(n_samples, tune_samples))
     batch_sizes = sorted({min(int(c), tune_samples) for c in candidates if int(c) > 0})
     if not batch_sizes:
         batch_sizes = [min(DEFAULT_QISKIT_BATCH_SIZE, tune_samples)]
 
-    trial_subset = trials[:1]
+    trial_count = max(1, min(len(trials), tune_trials))
+    trial_subset = trials[:trial_count]
     best_size = batch_sizes[0]
     best_time = float("inf")
     for batch_size in batch_sizes:
-        start = time.perf_counter()
-        benchmark(
-            n_qubits=n_qubits,
-            depth=depth,
-            beta_prop=beta_prop,
-            beta_thresh=beta_thresh,
-            n_samples=tune_samples,
-            n_trials=len(trial_subset),
-            seed=seed,
-            filter_type=filter_type,
-            softplus_tau=softplus_tau,
-            use_qiskit=True,
-            w0_density=w0_density,
-            trials=trial_subset,
-            compute_full=False,
-            compute_exp=False,
-            compute_filtered=True,
-            qiskit_batch_size=batch_size,
-            progress=False,
-        )
-        elapsed = time.perf_counter() - start
-        if elapsed < best_time:
-            best_time = elapsed
+        for warmup_idx in range(warmup_repeats):
+            benchmark(
+                n_qubits=n_qubits,
+                depth=depth,
+                beta_prop=beta_prop,
+                beta_thresh=beta_thresh,
+                n_samples=tune_samples,
+                n_trials=len(trial_subset),
+                seed=seed + 1000 + warmup_idx,
+                filter_type=filter_type,
+                softplus_tau=softplus_tau,
+                use_qiskit=True,
+                w0_density=w0_density,
+                trials=trial_subset,
+                compute_full=False,
+                compute_exp=False,
+                compute_filtered=True,
+                qiskit_batch_size=batch_size,
+                progress=False,
+            )
+
+        elapsed_runs = []
+        for rep in range(timed_repeats):
+            start = time.perf_counter()
+            benchmark(
+                n_qubits=n_qubits,
+                depth=depth,
+                beta_prop=beta_prop,
+                beta_thresh=beta_thresh,
+                n_samples=tune_samples,
+                n_trials=len(trial_subset),
+                seed=seed + 2000 + rep,
+                filter_type=filter_type,
+                softplus_tau=softplus_tau,
+                use_qiskit=True,
+                w0_density=w0_density,
+                trials=trial_subset,
+                compute_full=False,
+                compute_exp=False,
+                compute_filtered=True,
+                qiskit_batch_size=batch_size,
+                progress=False,
+            )
+            elapsed_runs.append(time.perf_counter() - start)
+        median_time = float(np.median(np.array(elapsed_runs, dtype=float)))
+        if median_time < best_time:
+            best_time = median_time
             best_size = batch_size
 
     _BATCH_SIZE_CACHE[key] = best_size
@@ -448,8 +466,6 @@ def compare_filters(
 ) -> None:
     console.rule("THRESHOLD vs SOFTPLUS FILTER COMPARISON")
 
-    if progress:
-        console.print("  Threshold trials")
     data_thresh = benchmark(
         n_qubits=n_qubits,
         depth=depth,
@@ -482,8 +498,6 @@ def compare_filters(
     )
 
     for tau in softplus_taus:
-        if progress:
-            console.print(f"  Softplus τ={tau:.2f} trials")
         data_soft = benchmark(
             n_qubits=n_qubits,
             depth=depth,
@@ -511,11 +525,11 @@ def compare_filters(
 
 
 def _run(config: dict) -> None:
-    w0_densities = _require_list(config, "w0_densities", DEFAULT_W0_DENSITIES)
-    beta_prop_values = _require_list(config, "beta_props", DEFAULT_BETA_PROPS)
-    beta_thresh_values = _require_list(config, "beta_threshes", DEFAULT_BETA_THRESHES)
-    softplus_taus = _require_list(config, "softplus_taus", DEFAULT_SOFTPLUS_TAUS)
-    filter_type = str(config.get("filter_type", "threshold"))
+    w0_densities = _require_list(config, "w0_densities")
+    beta_prop_values = _require_list(config, "beta_props")
+    beta_thresh_values = _require_list(config, "beta_threshes")
+    softplus_taus = _require_list(config, "softplus_taus")
+    filter_type = config["filter_type"]
     if filter_type not in {"threshold", "softplus"}:
         raise ValueError("filter_type must be 'threshold' or 'softplus'.")
     if not w0_densities:
@@ -527,28 +541,30 @@ def _run(config: dict) -> None:
     if filter_type == "softplus" and not softplus_taus:
         raise ValueError("softplus_taus cannot be empty for softplus sweeps.")
 
-    n_samples = int(config.get("n_samples", DEFAULT_N_SAMPLES))
-    n_trials = int(config.get("n_trials", DEFAULT_N_TRIALS))
-    seed = int(config.get("seed", DEFAULT_SEED))
-    use_qiskit = bool(config.get("use_qiskit", True))
-    progress = bool(config.get("progress", True))
-    skip_compare = bool(config.get("skip_compare", False))
-    timings = bool(config.get("timings", False))
+    n_samples = int(config["n_samples"])
+    n_trials = int(config["n_trials"])
+    seed = int(config["seed"])
+    use_qiskit = config["use_qiskit"]
+    progress = config["progress"]
+    skip_compare = config["skip_compare"]
+    timings = config["timings"]
+    profile = config["profile"]
 
-    raw_batch = config.get("qiskit_batch_size", DEFAULT_QISKIT_BATCH_SIZE)
-    autotune_batch = bool(config.get("autotune_batch_size", False))
+    raw_batch = config["qiskit_batch_size"]
+    autotune_batch = False
     if isinstance(raw_batch, str):
         if raw_batch.lower() != "auto":
             raise ValueError("qiskit_batch_size must be an int or 'auto'.")
         autotune_batch = True
         base_batch_size = DEFAULT_QISKIT_BATCH_SIZE
-    elif raw_batch is None:
-        base_batch_size = DEFAULT_QISKIT_BATCH_SIZE
     else:
         base_batch_size = int(raw_batch)
 
-    autotune_candidates = _require_list(config, "autotune_candidates", DEFAULT_AUTOTUNE_CANDIDATES)
-    autotune_samples = int(config.get("autotune_samples", DEFAULT_AUTOTUNE_SAMPLES))
+    autotune_candidates = _require_list(config, "autotune_candidates")
+    autotune_samples = int(config["autotune_samples"])
+    autotune_trials = int(config["autotune_trials"])
+    autotune_warmup = int(config["autotune_warmup"])
+    autotune_repeats = int(config["autotune_repeats"])
 
     configs = _resolve_configs(config)
     benchmark_count = _benchmark_count(
@@ -596,6 +612,9 @@ def _run(config: dict) -> None:
                 w0_density=w0_densities[0],
                 candidates=autotune_candidates,
                 tune_samples=autotune_samples,
+                tune_trials=autotune_trials,
+                warmup_repeats=autotune_warmup,
+                timed_repeats=autotune_repeats,
             )
             if progress:
                 console.print(f"Auto-tuned Qiskit batch size: {qiskit_batch_size}")
@@ -621,7 +640,7 @@ def _run(config: dict) -> None:
             progress=progress,
         )
         elapsed = time.perf_counter() - config_start
-        if timings or bool(config.get("profile", False)):
+        if timings or profile:
             volume = estimate_error_locs(n_qubits, depth)
             timing_rows.append(
                 {
@@ -681,9 +700,9 @@ def _run(config: dict) -> None:
 
 
 def _run_with_profile(config: dict) -> None:
-    profile_out = str(config.get("profile_out", DEFAULT_PROFILE_OUT))
-    profile_top = int(config.get("profile_top", DEFAULT_PROFILE_TOP))
-    profile_sort = str(config.get("profile_sort", DEFAULT_PROFILE_SORT))
+    profile_out = str(config["profile_out"])
+    profile_top = int(config["profile_top"])
+    profile_sort = str(config["profile_sort"])
 
     profiler = cProfile.Profile()
     profiler.enable()
@@ -705,7 +724,7 @@ def main() -> None:
     args = parser.parse_args()
 
     config = _load_config(args.config)
-    if bool(config.get("profile", False)):
+    if config["profile"]:
         _run_with_profile(config)
     else:
         _run(config)
