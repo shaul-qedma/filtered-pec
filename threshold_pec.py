@@ -55,6 +55,7 @@ from pec_shared import (
     Circuit,
     error_locations,
     random_circuit,
+    random_basis_state,
     random_product_state,
     random_observable,
 )
@@ -102,10 +103,18 @@ def _compute_ideal(
     circuit: Circuit,
     observable: str,
     initial_state: np.ndarray,
+    circuit_type: str,
 ) -> float:
     """Compute ideal expectation value (noiseless, no insertions)."""
+    if circuit_type == "clifford":
+        from clifford import stabilizer_expectation
+
+        return stabilizer_expectation(circuit, observable, initial_state)
+
+    if circuit_type != "brickwall":
+        raise ValueError(f"Unknown circuit_type: {circuit_type}")
+
     backend = QiskitStatevector()
-    # Empty noise model for ideal computation
     empty_noise: dict = {}
     return backend.expectation(circuit, observable, initial_state, empty_noise, {})
 
@@ -118,6 +127,7 @@ def generate_trials(
     twoq_gates: Optional[List[str]] = None,
     noise_model_config: Optional[Dict] = None,
     progress: bool = False,
+    circuit_type: str = "brickwall",
 ) -> List[TrialData]:
     trials: List[TrialData] = []
     trial_iter = tqdm(range(n_trials), desc="Generating trials", disable=not progress)
@@ -127,12 +137,20 @@ def generate_trials(
         if noise_model_config is not None and "seed" in noise_model_config:
             noise_seed = int(noise_model_config["seed"]) + t
         noise_rng = np.random.default_rng(noise_seed) if noise_seed is not None else rng
-        circuit = random_circuit(n_qubits, depth, rng, twoq_gates)
+        if circuit_type == "clifford":
+            from clifford import random_clifford_circuit
+
+            circuit = random_clifford_circuit(n_qubits, depth, rng, twoq_gates)
+            init = random_basis_state(n_qubits, rng)
+        elif circuit_type == "brickwall":
+            circuit = random_circuit(n_qubits, depth, rng, twoq_gates)
+            init = random_product_state(n_qubits, rng)
+        else:
+            raise ValueError(f"Unknown circuit_type: {circuit_type}")
         noise = generate_noise_model(noise_rng, noise_model_config, twoq_gates)
-        init = random_product_state(n_qubits, rng)
         obs = random_observable(n_qubits, rng)
         locs = error_locations(circuit, noise)
-        ideal = _compute_ideal(circuit, obs, init)
+        ideal = _compute_ideal(circuit, obs, init, circuit_type)
         trials.append(
             TrialData(
                 circuit=circuit,
@@ -459,6 +477,7 @@ def benchmark(
     diagnostics: Optional[Dict[str, bool]] = None,
     twoq_gates: Optional[List[str]] = None,
     noise_model_config: Optional[Dict] = None,
+    circuit_type: str = "brickwall",
 ) -> Dict:
     """
     Run PEC benchmark comparing full, exponential window, and threshold-filtered methods.
@@ -477,6 +496,7 @@ def benchmark(
             seed=seed,
             twoq_gates=twoq_gates,
             noise_model_config=noise_model_config,
+            circuit_type=circuit_type,
         )
 
     results: Dict[str, List[Dict[str, Any]]] = {
@@ -608,6 +628,7 @@ def benchmark(
             "n_trials": len(trials),
             "filter_type": filter_type,
             "softplus_tau": softplus_tau,
+            "circuit_type": circuit_type,
         },
     }
 

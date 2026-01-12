@@ -10,8 +10,8 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 
-from constants import DEFAULT_BATCH_SIZE, QISKIT_METHOD
-from pec_shared import Circuit
+from constants import DEFAULT_BATCH_SIZE
+from pec_shared import Circuit, Gate, kraus_to_probs
 
 
 class Backend(ABC):
@@ -75,7 +75,7 @@ class QiskitStatevector(Backend):
             "Pauli": Pauli,
             "Statevector": Statevector,
             "Kraus": Kraus,
-            "AerSimulator": AerSimulator(method=QISKIT_METHOD),
+            "AerSimulator": AerSimulator(method="statevector"),
         }
     
     def _get_noise_instructions(self, noise: dict) -> dict:
@@ -430,6 +430,207 @@ class CirqSimulator(Backend):
         return values
 
 
+class StimClifford(Backend):
+    """Stim-backed stabilizer simulator for Clifford circuits with Pauli noise."""
+
+    def __init__(self):
+        self._stim = None
+        self._noise_cache: Dict[int, dict] = {}
+        self._gate_cache: Dict[Tuple[str, Tuple[int, ...]], "stim.Circuit"] = {}
+
+    def _ensure_stim(self):
+        if self._stim is not None:
+            return
+        try:
+            import stim  # type: ignore
+        except ImportError as exc:
+            raise ImportError("stim required. Install with: pip install stim") from exc
+        self._stim = stim
+
+    def _gate_circuit(self, op: str, targets: Tuple[int, ...]):
+        self._ensure_stim()
+        stim = self._stim
+        key = (op, targets)
+        if key not in self._gate_cache:
+            circ = stim.Circuit()
+            circ.append(op, list(targets))
+            self._gate_cache[key] = circ
+        return self._gate_cache[key]
+
+    def _pauli_channel_lambda(self, probs: np.ndarray, pauli: str) -> float:
+        if pauli == "I":
+            return 1.0
+        p_i, p_x, p_y, p_z = [float(x) for x in probs]
+        if pauli == "X":
+            return p_i + p_x - p_y - p_z
+        if pauli == "Y":
+            return p_i - p_x + p_y - p_z
+        if pauli == "Z":
+            return p_i - p_x - p_y + p_z
+        raise ValueError(f"Unknown Pauli: {pauli}")
+
+    def _pauli_on_qubit(self, pauli, qubit: int) -> str:
+        if hasattr(pauli, "xs") and hasattr(pauli, "zs"):
+            x = bool(pauli.xs[qubit])
+            z = bool(pauli.zs[qubit])
+            if x and z:
+                return "Y"
+            if x:
+                return "X"
+            if z:
+                return "Z"
+            return "I"
+
+        pauli_str = str(pauli)
+        if pauli_str.startswith("-i"):
+            pauli_str = pauli_str[2:]
+        elif pauli_str.startswith("i"):
+            pauli_str = pauli_str[1:]
+        elif pauli_str.startswith(("-", "+")):
+            pauli_str = pauli_str[1:]
+        return pauli_str[qubit]
+
+    def _basis_bits(self, state: Optional[np.ndarray], n_qubits: int) -> List[int]:
+        if state is None:
+            return [0] * n_qubits
+        if state.ndim != 1 or state.size != 2 ** n_qubits:
+            raise ValueError("Stim backend requires a computational basis state.")
+        mags = np.abs(state)
+        idx = int(np.argmax(mags))
+        if not np.isclose(np.sum(mags > 1e-8), 1):
+            raise ValueError("Stim backend only supports computational basis states.")
+        return [(idx >> i) & 1 for i in range(n_qubits)]
+
+    def _basis_expectation(self, pauli, bits: List[int]) -> float:
+        pauli_str = str(pauli)
+        phase = 1.0 + 0.0j
+        if pauli_str.startswith("-i"):
+            phase = -1j
+            pauli_str = pauli_str[2:]
+        elif pauli_str.startswith("i"):
+            phase = 1j
+            pauli_str = pauli_str[1:]
+        elif pauli_str.startswith("-"):
+            phase = -1.0
+            pauli_str = pauli_str[1:]
+        elif pauli_str.startswith("+"):
+            pauli_str = pauli_str[1:]
+
+        for q, p in enumerate(pauli_str):
+            if p in ("X", "Y"):
+                return 0.0
+            if p == "Z" and bits[q]:
+                phase *= -1
+        return float(np.real(phase))
+
+    def _get_noise_probs(self, noise: dict) -> dict:
+        if not noise:
+            return {}
+        noise_id = id(noise)
+        if noise_id in self._noise_cache:
+            return self._noise_cache[noise_id]
+
+        probs = {}
+        for gate, (k1, k2) in noise.items():
+            probs[gate] = (kraus_to_probs(k1), kraus_to_probs(k2))
+        self._noise_cache[noise_id] = probs
+        return probs
+
+    def _apply_ops(self, pauli, ops: List[Tuple[str, Tuple[int, ...]]]):
+        for op, targets in ops:
+            pauli = pauli.after(self._gate_circuit(op, targets))
+        return pauli
+
+    def _apply_gate(self, pauli, gate: Gate):
+        if isinstance(gate.content, np.ndarray):
+            seq = getattr(gate, "clifford_seq", None)
+            if seq is None:
+                raise ValueError("Stim backend requires clifford_seq on 1Q gates.")
+            q = int(gate.qubits[0])
+            ops = [(op, (q,)) for op in seq]
+            return self._apply_ops(pauli, ops)
+
+        if isinstance(gate.content, str):
+            q0, q1 = int(gate.qubits[0]), int(gate.qubits[1])
+            if gate.content == "CNOT":
+                return self._apply_ops(pauli, [("CX", (q0, q1))])
+            if gate.content == "CNOT_R":
+                return self._apply_ops(pauli, [("CX", (q1, q0))])
+            if gate.content == "CZ":
+                return self._apply_ops(pauli, [("CZ", (q0, q1))])
+            if gate.content == "SWAP":
+                return self._apply_ops(pauli, [("SWAP", (q0, q1))])
+            raise ValueError(f"Unsupported Clifford 2Q gate: {gate.content}")
+
+        raise ValueError("Unsupported Clifford gate content type.")
+
+    def expectation(
+        self,
+        circuit: Circuit,
+        observable: str,
+        initial_state: np.ndarray,
+        noise: dict,
+        insertions: Optional[Dict[Tuple[int, int], int]] = None,
+    ) -> float:
+        return self.batch_expectations(
+            circuit, observable, initial_state, noise, [insertions or {}]
+        )[0]
+
+    def batch_expectations(
+        self,
+        circuit: Circuit,
+        observable: str,
+        initial_state: np.ndarray,
+        noise: dict,
+        insertions_list: Optional[List[Dict[Tuple[int, int], int]]] = None,
+    ) -> List[float]:
+        if insertions_list is None:
+            insertions_list = [{}]
+
+        self._ensure_stim()
+        stim = self._stim
+
+        n_qubits = circuit.n_qubits
+        if len(observable) != n_qubits:
+            raise ValueError("Observable length must match circuit.n_qubits.")
+
+        bits = self._basis_bits(initial_state, n_qubits)
+        noise_probs = self._get_noise_probs(noise)
+
+        values = []
+        for insertions in insertions_list:
+            pauli = stim.PauliString(observable)
+            scale = 1.0
+            for layer_idx in range(len(circuit.layers) - 1, -1, -1):
+                layer = circuit.layers[layer_idx]
+                for gate in layer:
+                    if isinstance(gate.content, np.ndarray):
+                        pauli = self._apply_gate(pauli, gate)
+                        continue
+
+                    name = gate.content
+                    q0, q1 = int(gate.qubits[0]), int(gate.qubits[1])
+                    if name in noise_probs:
+                        probs0, probs1 = noise_probs[name]
+                        for qubit, probs in ((q0, probs0), (q1, probs1)):
+                            s = int(insertions.get((layer_idx, qubit), 0))
+                            if s == 1:
+                                pauli = self._apply_ops(pauli, [("X", (qubit,))])
+                            elif s == 2:
+                                pauli = self._apply_ops(pauli, [("Y", (qubit,))])
+                            elif s == 3:
+                                pauli = self._apply_ops(pauli, [("Z", (qubit,))])
+
+                            pauli_kind = self._pauli_on_qubit(pauli, qubit)
+                            scale *= self._pauli_channel_lambda(probs, pauli_kind)
+
+                    pauli = self._apply_gate(pauli, gate)
+
+            values.append(scale * self._basis_expectation(pauli, bits))
+
+        return values
+
+
 
 
 def create_backend(
@@ -443,5 +644,7 @@ def create_backend(
         return QiskitStatevector(batch_size=batch_size)
     if name == "cirq":
         return CirqSimulator(n_threads=n_threads)
+    if name == "stim":
+        return StimClifford()
     else:
         raise ValueError(f"Unknown backend: {name}")

@@ -19,6 +19,7 @@ from tqdm import tqdm
 import yaml
 
 from constants import DEFAULT_BATCH_SIZE, SOFTPLUS_TAU_DEFAULT
+from backend import create_backend
 from threshold_pec import benchmark, generate_trials, TrialData
 
 console = Console()
@@ -32,9 +33,17 @@ def _load_config(path: str) -> dict:
         data = yaml.safe_load(handle) or {}
     if not isinstance(data, dict):
         raise ValueError("Sweep config must be a mapping.")
+
+    backend = data.get("backend", "qiskit_statevector")
+    valid_backends = {"qiskit_statevector", "cirq", "stim"}
+    if backend not in valid_backends:
+        raise ValueError(f"backend must be one of {valid_backends}, got '{backend}'")
     
     # Validate noise_model if present in circuit_config
     circuit_config = data.get("circuit_config", {})
+    circuit_type = circuit_config.get("circuit_type", "brickwall")
+    if circuit_type not in {"brickwall", "clifford"}:
+        raise ValueError(f"circuit_type must be 'brickwall' or 'clifford', got '{circuit_type}'")
     if "noise_model" in circuit_config:
         nm = circuit_config["noise_model"]
         valid_types = {"kraus", "pauli", "per_gate", "depolarizing"}
@@ -122,7 +131,7 @@ def _benchmark_count(
     return 1 + len(w0_densities) * len(beta_prop_values) * len(beta_thresh_values) * tau_count
 
 
-def _autotune_qiskit_batch_size(
+def _autotune_batch_size(
     n_qubits: int,
     depth: int,
     trials: List[TrialData],
@@ -133,6 +142,8 @@ def _autotune_qiskit_batch_size(
     filter_type: str,
     softplus_tau: float,
     w0_density: float,
+    backend_name: str,
+    backend_threads: int,
     candidates: List[int],
     tune_samples: int,
     tune_trials: int,
@@ -168,6 +179,7 @@ def _autotune_qiskit_batch_size(
     batch_iter = tqdm(batch_sizes, desc="Autotuning batch size", disable=not progress)
     for batch_size in batch_iter:
         for warmup_idx in range(warmup_repeats):
+            backend = create_backend(backend_name, batch_size=batch_size, n_threads=backend_threads)
             benchmark(
                 n_qubits=n_qubits,
                 depth=depth,
@@ -183,6 +195,7 @@ def _autotune_qiskit_batch_size(
                 compute_full=False,
                 compute_exp=False,
                 compute_filtered=True,
+                backend=backend,
                 batch_size=batch_size,
                 progress=False,
             )
@@ -190,6 +203,7 @@ def _autotune_qiskit_batch_size(
         elapsed_runs = []
         for rep in range(timed_repeats):
             start = time.perf_counter()
+            backend = create_backend(backend_name, batch_size=batch_size, n_threads=backend_threads)
             benchmark(
                 n_qubits=n_qubits,
                 depth=depth,
@@ -205,6 +219,7 @@ def _autotune_qiskit_batch_size(
                 compute_full=False,
                 compute_exp=False,
                 compute_filtered=True,
+                backend=backend,
                 batch_size=batch_size,
                 progress=False,
             )
@@ -230,10 +245,13 @@ def parameter_sweep(
     filter_type: str,
     softplus_taus: List[float],
     trials: Optional[List[TrialData]] = None,
+    backend=None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     progress: bool = True,
     twoq_gates: Optional[List[str]] = None,
     noise_model_config: Optional[Dict] = None,
+    circuit_type: str = "brickwall",
+    backend_name: str = "qiskit_statevector",
 ) -> Dict[str, Any]:
     """
     Run parameter sweep over w0_density, beta_prop, beta_thresh, and optionally softplus_tau.
@@ -246,10 +264,11 @@ def parameter_sweep(
             seed=seed,
             twoq_gates=twoq_gates,
             noise_model_config=noise_model_config,
+            circuit_type=circuit_type,
         )
 
     console.rule(f"Parameter Sweep: {n_qubits}q, depth={depth}")
-    console.print(f"Samples: {n_samples}, Trials: {n_trials}, Batch size: {batch_size}")
+    console.print(f"Samples: {n_samples}, Trials: {n_trials}, Batch size: {batch_size}, Backend: {backend_name}")
 
     # Baseline: exponential window only
     baseline_data = benchmark(
@@ -267,8 +286,10 @@ def parameter_sweep(
         compute_full=True,
         compute_exp=True,
         compute_filtered=False,
+        backend=backend,
         batch_size=batch_size,
         progress=progress,
+        circuit_type=circuit_type,
     )
 
     full_results = baseline_data["results"]["full_pec"]
@@ -314,8 +335,10 @@ def parameter_sweep(
             compute_full=False,
             compute_exp=False,
             compute_filtered=True,
+            backend=backend,
             batch_size=batch_size,
             progress=False,
+            circuit_type=circuit_type,
         )
         
         stats = _summary_from_filtered(data["results"]["filtered"])
@@ -380,8 +403,10 @@ def compare_filters(
     beta_thresh: float,
     softplus_taus: List[float],
     trials: Optional[List[TrialData]] = None,
+    backend=None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     progress: bool = True,
+    circuit_type: str = "brickwall",
 ) -> None:
     """Compare threshold vs softplus filters."""
     console.rule("Filter Comparison: Threshold vs Softplus")
@@ -392,6 +417,7 @@ def compare_filters(
             depth=depth,
             n_trials=n_trials,
             seed=seed,
+            circuit_type=circuit_type,
         )
 
     # Threshold filter
@@ -409,8 +435,10 @@ def compare_filters(
         compute_full=False,
         compute_exp=False,
         compute_filtered=True,
+        backend=backend,
         batch_size=batch_size,
         progress=progress,
+        circuit_type=circuit_type,
     )
     thresh_stats = _summary_from_filtered(data_thresh["results"]["filtered"])
 
@@ -442,8 +470,10 @@ def compare_filters(
             compute_full=False,
             compute_exp=False,
             compute_filtered=True,
+            backend=backend,
             batch_size=batch_size,
             progress=progress,
+            circuit_type=circuit_type,
         )
         soft_stats = _summary_from_filtered(data_soft["results"]["filtered"])
         table.add_row(
@@ -480,13 +510,20 @@ def _run(config: dict) -> None:
     timings = config["timings"]
     profile = config["profile"]
 
-    raw_batch = config["qiskit_batch_size"]
+    backend_name = config.get("backend", "qiskit_statevector")
+    backend_threads = int(config.get("backend_threads", 0))
+
+    if "batch_size" in config and "qiskit_batch_size" in config:
+        raise ValueError("Use either batch_size or qiskit_batch_size, not both.")
+    raw_batch = config.get("batch_size", config.get("qiskit_batch_size", DEFAULT_BATCH_SIZE))
     autotune_batch = False
     if isinstance(raw_batch, str):
         if raw_batch.lower() != "auto":
-            raise ValueError("qiskit_batch_size must be an int or 'auto'.")
-        autotune_batch = True
+            raise ValueError("batch_size must be an int or 'auto'.")
+        autotune_batch = backend_name == "qiskit_statevector"
         base_batch_size = DEFAULT_BATCH_SIZE
+        if not autotune_batch and progress:
+            console.print("[dim]Autotune only supported for qiskit_statevector; using default batch size.[/dim]")
     else:
         base_batch_size = int(raw_batch)
 
@@ -500,6 +537,11 @@ def _run(config: dict) -> None:
     circuit_config = config.get("circuit_config", {})
     twoq_gates = circuit_config.get("twoq_gates")
     noise_model_config = circuit_config.get("noise_model")
+    circuit_type = circuit_config.get("circuit_type", "brickwall")
+    if circuit_type not in {"brickwall", "clifford"}:
+        raise ValueError("circuit_type must be 'brickwall' or 'clifford'.")
+    if backend_name == "stim" and circuit_type != "clifford":
+        raise ValueError("stim backend requires circuit_type='clifford'.")
 
     configs = _resolve_configs(config)
     benchmark_count = _benchmark_count(
@@ -533,6 +575,7 @@ def _run(config: dict) -> None:
             twoq_gates=twoq_gates,
             noise_model_config=noise_model_config,
             progress=progress,
+            circuit_type=circuit_type,
         )
         if idx == 0:
             first_trials = trials
@@ -543,7 +586,7 @@ def _run(config: dict) -> None:
             if progress:
                 console.print(f"[dim]Autotuning batch size for {n_qubits}q, depth={depth}...[/dim]")
             tune_tau = softplus_taus[0] if filter_type == "softplus" else SOFTPLUS_TAU_DEFAULT
-            batch_size = _autotune_qiskit_batch_size(
+            batch_size = _autotune_batch_size(
                 n_qubits=n_qubits,
                 depth=depth,
                 trials=trials,
@@ -554,6 +597,8 @@ def _run(config: dict) -> None:
                 filter_type=filter_type,
                 softplus_tau=tune_tau,
                 w0_density=w0_densities[0],
+                backend_name=backend_name,
+                backend_threads=backend_threads,
                 candidates=autotune_candidates,
                 tune_samples=autotune_samples,
                 tune_trials=autotune_trials,
@@ -567,6 +612,7 @@ def _run(config: dict) -> None:
         if idx == 0:
             first_batch_size = batch_size
 
+        backend = create_backend(backend_name, batch_size=batch_size, n_threads=backend_threads)
         config_start = time.perf_counter()
         parameter_sweep(
             n_qubits=n_qubits,
@@ -580,8 +626,11 @@ def _run(config: dict) -> None:
             filter_type=filter_type,
             softplus_taus=softplus_taus,
             trials=trials,
+            backend=backend,
             batch_size=batch_size,
             progress=progress,
+            circuit_type=circuit_type,
+            backend_name=backend_name,
         )
         elapsed = time.perf_counter() - config_start
         if timings or profile:
@@ -610,8 +659,10 @@ def _run(config: dict) -> None:
             beta_thresh=beta_thresh_values[0],
             softplus_taus=softplus_taus,
             trials=first_trials,
+            backend=create_backend(backend_name, batch_size=first_batch_size or base_batch_size, n_threads=backend_threads),
             batch_size=first_batch_size or base_batch_size,
             progress=progress,
+            circuit_type=circuit_type,
         )
 
     if timing_rows:

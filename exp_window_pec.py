@@ -16,7 +16,7 @@ from rich.table import Table
 from tqdm import tqdm
 
 from backend import Backend, QiskitStatevector
-from constants import DEFAULT_QISKIT_BATCH_SIZE
+from constants import DEFAULT_BATCH_SIZE
 from estimators import PECEstimate
 from pec_shared import ETA, Circuit
 
@@ -58,7 +58,7 @@ def pec_estimate(
     n_samples: int,
     seed: int = 0,
     backend: Backend | None = None,
-    batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     progress: bool = False,
 ) -> PECEstimate:
     """

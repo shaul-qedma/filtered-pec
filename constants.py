@@ -28,10 +28,9 @@ SEED_OFFSET_FILTERED = 3000
 MIN_SAMPLES = 1
 MIN_STD_SAMPLES = 2
 
-# Qiskit
-QISKIT_METHOD = "statevector"
+# Simulation
 DEFAULT_BATCH_SIZE = 10
 
-# Circuit defaults
+# Circuits
 DEFAULT_N_QUBITS = 8
 DEFAULT_DEPTH = 500

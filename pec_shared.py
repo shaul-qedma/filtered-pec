@@ -178,6 +178,12 @@ def random_product_state(n_qubits, rng):
         state = np.kron(state, np.array([np.cos(t/2), np.exp(1j*p)*np.sin(t/2)]))
     return state
 
+
+def random_basis_state(n_qubits, rng):
+    idx = int(rng.integers(0, 2 ** n_qubits))
+    state = np.zeros(2 ** n_qubits, dtype=complex)
+    state[idx] = 1.0
+    return state
+
 def random_observable(n_qubits, rng):
     return ''.join(rng.choice(list('IXYZ')) for _ in range(n_qubits))
-
