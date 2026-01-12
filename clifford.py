@@ -75,9 +75,7 @@ class CliffordGate(Gate):
 
 def _stim_gate_ops(gate: Gate) -> Iterable[Tuple[str, List[int]]]:
     if isinstance(gate.content, np.ndarray):
-        seq = getattr(gate, "clifford_seq", None)
-        if not seq:
-            raise ValueError("Clifford 1Q gate missing clifford_seq decomposition.")
+        seq = _clifford_seq_for_gate(gate)
         q = int(gate.qubits[0])
         for op in seq:
             yield op, [q]

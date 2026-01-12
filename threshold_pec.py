@@ -550,12 +550,17 @@ def benchmark(
         est_filtered: Optional[ThresholdPECEstimate] = None
 
         if compute_full:
+            full_locs = locs
+            if circuit_type == "clifford":
+                from clifford import lightcone_error_locations
+
+                full_locs = lightcone_error_locations(circuit, noise, obs)
             est_full = pec_estimate(
                 circuit=circuit,
                 observable=obs,
                 initial_state=init,
                 noise=noise,
-                error_locs=locs,
+                error_locs=full_locs,
                 beta=0.0,  # Full PEC
                 n_samples=n_samples,
                 seed=seed + SEED_OFFSET_FULL + t,

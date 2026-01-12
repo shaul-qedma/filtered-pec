@@ -1,0 +1,35 @@
+# Quick Clifford sweep for fast sanity checks.
+filter_type: threshold
+n_samples: 1000
+n_trials: 2
+seed: 42
+progress: true
+skip_compare: true
+timings: false
+profile: false
+
+backend: stim
+backend_threads: 0
+batch_size: 1
+
+n_qubits: 6
+depth: 200
+
+w0_densities: [0.40]
+beta_props: [0.15]
+beta_threshes: [0.15]
+softplus_taus: [1.0]
+
+circuit_config:
+  circuit_type: clifford
+  twoq_gates: ["CNOT", "CNOT_R", "CZ", "SWAP"]
+  noise_model:
+    type: depolarizing
+    infidelity: 0.01
+    isotropic: false
+
+autotune_candidates: [4, 6, 8, 10]
+autotune_samples: 32
+autotune_trials: 1
+autotune_warmup: 0
+autotune_repeats: 1

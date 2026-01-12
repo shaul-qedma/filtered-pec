@@ -13,13 +13,26 @@ import numpy as np
 from constants import DEFAULT_BATCH_SIZE
 from pec_shared import Circuit, Gate
 
-import cirq
-import stim 
+try:
+    import cirq
+except ImportError:  # pragma: no cover - optional dependency
+    cirq = None  # type: ignore[assignment]
 
-from qiskit import QuantumCircuit
-from qiskit.circuit.library import UnitaryGate
-from qiskit.quantum_info import Operator, Pauli, Statevector, Kraus
-from qiskit_aer import AerSimulator
+try:
+    import stim  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    stim = None  # type: ignore[assignment]
+
+try:
+    from qiskit import QuantumCircuit
+    from qiskit.circuit.library import UnitaryGate
+    from qiskit.quantum_info import Operator, Pauli, Statevector
+except ImportError:  # pragma: no cover - optional dependency
+    QuantumCircuit = None  # type: ignore[assignment]
+    UnitaryGate = None  # type: ignore[assignment]
+    Operator = None  # type: ignore[assignment]
+    Pauli = None  # type: ignore[assignment]
+    Statevector = None  # type: ignore[assignment]
 
 class Backend(ABC):
     """Abstract base class for circuit simulation backends."""
@@ -190,6 +203,7 @@ class CirqSimulator(Backend):
 
         for l, layer in enumerate(circuit.layers):
             layer_ops = []
+            insertion_ops = []
 
             for gate in layer:
                 if isinstance(gate.content, np.ndarray):
@@ -215,10 +229,12 @@ class CirqSimulator(Backend):
                     s = insertions.get((l, q_idx), 0)
                     pauli = self._pauli_gate(s)
                     if pauli is not None:
-                        layer_ops.append(pauli.on(q))
+                        insertion_ops.append(pauli.on(q))
 
             if layer_ops:
                 moments.append(cirq.Moment(layer_ops))
+            if insertion_ops:
+                moments.append(cirq.Moment(insertion_ops))
 
         return cirq.Circuit(moments)
 
