@@ -26,6 +26,7 @@ import numpy as np
 from rich import box
 from rich.console import Console
 from rich.table import Table
+from tqdm import tqdm
 
 from exp_window_pec import (
     exp_window_quasi_prob,
@@ -38,7 +39,6 @@ from exp_window_pec import (
     _to_qiskit_statevector,
 )
 from pec_shared import (
-    ETA,
     STANDARD_GATES,
     Circuit,
     NoisySimulator,
@@ -83,14 +83,6 @@ def h_softplus(weight: int, beta: float, w0: float, tau: float = SOFTPLUS_TAU_DE
     return float(np.exp(-beta * sp * tau))
 
 
-def critical_beta(p: np.ndarray) -> float:
-    """Critical beta where local q becomes non-negative."""
-    eigenvalues = ETA @ p
-    min_eigenvalue = min(eigenvalues[1], eigenvalues[2], eigenvalues[3])
-    if min_eigenvalue <= 0:
-        return float("inf")
-    return float(-np.log(min_eigenvalue))
-
 def _resolve_w0(
     w0_density: Optional[float],
     n_locs: int,
@@ -114,8 +106,6 @@ class ThresholdPECEstimate:
     weight_mean: float
     weight_std: float
     weight_above_frac: float
-    exp_mean: Optional[float] = None
-    exp_std: Optional[float] = None
 
 
 def _resolve_filter(
@@ -148,6 +138,8 @@ def _importance_sampling_estimate(
     n_samples: int,
     rng: np.random.Generator,
     w0_value: Optional[int],
+    progress: bool = False,
+    progress_desc: Optional[str] = None,
 ) -> ThresholdPECEstimate:
     if n_samples < MIN_SAMPLES:
         raise ValueError("n_samples must be positive")
@@ -164,8 +156,6 @@ def _importance_sampling_estimate(
             weight_mean=0.0,
             weight_std=0.0,
             weight_above_frac=0.0,
-            exp_mean=base_val,
-            exp_std=0.0,
         )
 
     local_q = [exp_window_quasi_prob(p, beta_prop) for (_, _, p) in error_locs]
@@ -175,12 +165,21 @@ def _importance_sampling_estimate(
     sampling_probs = [np.abs(q) / g for q, g in zip(local_q, local_qp_norm)]
     sampling_signs = [np.sign(q) for q in local_q]
 
-    exp_estimates = np.empty(n_samples, dtype=float)
     target_estimates = np.empty(n_samples, dtype=float)
     importance_weights = np.empty(n_samples, dtype=float)
     sample_weights = np.empty(n_samples, dtype=float)
 
-    for i in range(n_samples):
+    sample_iter = range(n_samples)
+    if progress:
+        sample_iter = tqdm(
+            sample_iter,
+            desc=progress_desc or "samples",
+            leave=False,
+            ascii=True,
+            mininterval=1.0,
+        )
+
+    for i in sample_iter:
         insertions: Dict[Tuple[int, int], int] = {}
         sign = 1.0
         weight = 0
@@ -198,13 +197,9 @@ def _importance_sampling_estimate(
         h_targ = h_target(weight)
         iw = h_targ / h_prop if h_prop > EPS_H_PROP else 0.0
 
-        exp_estimates[i] = exp_val
         target_estimates[i] = iw * exp_val
         importance_weights[i] = iw
         sample_weights[i] = weight
-
-    exp_mean = total_qp_norm * float(exp_estimates.mean())
-    exp_std = total_qp_norm * _standard_error(exp_estimates)
     target_mean = total_qp_norm * float(target_estimates.mean())
     target_std = total_qp_norm * _standard_error(target_estimates)
 
@@ -223,8 +218,6 @@ def _importance_sampling_estimate(
         weight_mean=float(sample_weights.mean()),
         weight_std=float(sample_weights.std(ddof=STD_DDOF)) if n_samples >= MIN_STD_SAMPLES else 0.0,
         weight_above_frac=above_frac,
-        exp_mean=exp_mean,
-        exp_std=exp_std,
     )
 
 
@@ -242,6 +235,8 @@ def threshold_pec_estimate(
     softplus_tau: float = SOFTPLUS_TAU_DEFAULT,
     h_target: Optional[Callable[[int], float]] = None,
     w0_density: float = 0.30,
+    progress: bool = False,
+    progress_desc: Optional[str] = None,
 ) -> ThresholdPECEstimate:
     rng = np.random.default_rng(seed)
     w0_value = _resolve_w0(w0_density, len(error_locs))
@@ -251,7 +246,15 @@ def threshold_pec_estimate(
         return float(sim.run(circuit, observable, initial_state, insertions))
 
     return _importance_sampling_estimate(
-        measure, error_locs, beta_prop, h_fn, n_samples, rng, w0_value
+        measure,
+        error_locs,
+        beta_prop,
+        h_fn,
+        n_samples,
+        rng,
+        w0_value,
+        progress=progress,
+        progress_desc=progress_desc,
     )
 
 
@@ -269,6 +272,8 @@ def threshold_pec_qiskit(
     softplus_tau: float = SOFTPLUS_TAU_DEFAULT,
     h_target: Optional[Callable[[int], float]] = None,
     w0_density: float = 0.30,
+    progress: bool = False,
+    progress_desc: Optional[str] = None,
 ) -> ThresholdPECEstimate:
     rng = np.random.default_rng(seed)
     w0_value = _resolve_w0(w0_density, len(error_locs))
@@ -296,7 +301,15 @@ def threshold_pec_qiskit(
         return float(np.real(sv.expectation_value(pauli_obs)))
 
     return _importance_sampling_estimate(
-        measure, error_locs, beta_prop, h_fn, n_samples, rng, w0_value
+        measure,
+        error_locs,
+        beta_prop,
+        h_fn,
+        n_samples,
+        rng,
+        w0_value,
+        progress=progress,
+        progress_desc=progress_desc,
     )
 
 
@@ -312,6 +325,7 @@ def benchmark(
     softplus_tau: float = SOFTPLUS_TAU_DEFAULT,
     use_qiskit: bool = False,
     w0_density: float = 0.30,
+    progress: bool = False,
 ) -> Dict:
     results = {
         "full_pec": [],
@@ -321,7 +335,17 @@ def benchmark(
     ideals = []
 
     w0_values: List[int] = []
-    for t in range(n_trials):
+    trial_iter = range(n_trials)
+    if progress:
+        trial_iter = tqdm(
+            trial_iter,
+            desc="trials",
+            leave=False,
+            ascii=True,
+            mininterval=1.0,
+        )
+
+    for t in trial_iter:
         rng = np.random.default_rng(seed + t)
         circuit = random_circuit(n_qubits, depth, rng)
         noise = random_noise_model(rng)
@@ -345,6 +369,8 @@ def benchmark(
                 beta=0.0,
                 n_samples=n_samples,
                 seed=seed + SEED_OFFSET_FULL * t,
+                progress=progress,
+                progress_desc="full_pec samples",
             )
             est_exp = pec_estimate_qiskit(
                 circuit,
@@ -355,6 +381,8 @@ def benchmark(
                 beta=beta_prop,
                 n_samples=n_samples,
                 seed=seed + SEED_OFFSET_EXP * t,
+                progress=progress,
+                progress_desc="exp_window samples",
             )
             est_filtered = threshold_pec_qiskit(
                 circuit,
@@ -369,6 +397,8 @@ def benchmark(
                 filter_type=filter_type,
                 softplus_tau=softplus_tau,
                 w0_density=w0_density,
+                progress=progress,
+                progress_desc="filtered samples",
             )
         else:
             est_full = pec_estimate(
@@ -380,6 +410,8 @@ def benchmark(
                 beta=0.0,
                 n_samples=n_samples,
                 seed=seed + SEED_OFFSET_FULL * t,
+                progress=progress,
+                progress_desc="full_pec samples",
             )
             est_exp = pec_estimate(
                 sim,
@@ -390,6 +422,8 @@ def benchmark(
                 beta=beta_prop,
                 n_samples=n_samples,
                 seed=seed + SEED_OFFSET_EXP * t,
+                progress=progress,
+                progress_desc="exp_window samples",
             )
             est_filtered = threshold_pec_estimate(
                 sim,
@@ -404,6 +438,8 @@ def benchmark(
                 filter_type=filter_type,
                 softplus_tau=softplus_tau,
                 w0_density=w0_density,
+                progress=progress,
+                progress_desc="filtered samples",
             )
 
         results["full_pec"].append(
@@ -472,8 +508,6 @@ def print_benchmark_results(data: Dict) -> None:
     table.add_column("Bias", justify="right")
     table.add_column("RMSE", justify="right")
     table.add_column("ESS", justify="right")
-    table.add_column("w_mean", justify="right")
-    table.add_column("p_gt_w0", justify="right")
 
     for method in ["full_pec", "exp_window", "filtered"]:
         data_m = results[method]
@@ -487,16 +521,12 @@ def print_benchmark_results(data: Dict) -> None:
         if method == "filtered":
             ess = float(np.mean([d["ess"] for d in data_m]))
             name = label
-            w_mean = float(np.mean([d.get("weight_mean") for d in data_m if "weight_mean" in d]))
-            above = float(np.mean([d.get("above") for d in data_m if "above" in d]))
             table.add_row(
                 name,
                 f"{mean_qp_norm:.2f}",
                 f"{bias:.4f}",
                 f"{rmse:.4f}",
                 f"{ess:.1f}",
-                f"{w_mean:.2f}",
-                f"{above:.2f}",
             )
         else:
             name = "full_pec" if method == "full_pec" else "exp_window"
@@ -506,8 +536,6 @@ def print_benchmark_results(data: Dict) -> None:
                 f"{bias:.4f}",
                 f"{rmse:.4f}",
                 "N/A",
-                "-",
-                "-",
             )
 
     console.print(table)

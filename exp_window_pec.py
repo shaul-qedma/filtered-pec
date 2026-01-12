@@ -16,7 +16,7 @@ The quasi-probability:
 
 import numpy as np
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from pec_shared import (
     ETA, NoisySimulator, Circuit
@@ -25,6 +25,7 @@ from pec_shared import (
 from rich import box
 from rich.console import Console
 from rich.table import Table
+from tqdm import tqdm
 
 DIRECT_STATEVECTOR_QUBITS_MAX = 1
 QISKIT_METHOD = "statevector"
@@ -101,7 +102,9 @@ def pec_estimate(
     error_locs: List[Tuple],
     beta: float,
     n_samples: int,
-    seed: int = 0
+    seed: int = 0,
+    progress: bool = False,
+    progress_desc: Optional[str] = None,
 ) -> PECEstimate:
     """
     PEC estimation with exponential window filter.
@@ -135,7 +138,17 @@ def pec_estimate(
     # Monte Carlo sampling
     estimates = np.empty(n_samples)
     
-    for i in range(n_samples):
+    sample_iter = range(n_samples)
+    if progress:
+        sample_iter = tqdm(
+            sample_iter,
+            desc=progress_desc or "samples",
+            leave=False,
+            ascii=True,
+            mininterval=1.0,
+        )
+
+    for i in sample_iter:
         # Sample Pauli insertions independently at each location
         insertions = {}
         sign = 1.0
@@ -242,38 +255,6 @@ def _build_qiskit_circuit(
     return qc
 
 
-def noisy_expectation_qiskit(
-    circuit: Circuit,
-    observable: str,
-    initial_state: np.ndarray,
-    noise: dict,
-) -> float:
-    """
-    Noisy expectation value using Qiskit simulation (no PEC insertions).
-    """
-    QuantumCircuit, UnitaryGate, Operator, Pauli, Statevector, Kraus, AerSimulator = _require_qiskit()
-
-    init_state = _to_qiskit_statevector(initial_state, circuit.n_qubits)
-    pauli_obs = Operator(Pauli(observable[::-1]))
-    noise_instr = _qiskit_noise_instructions(noise, Kraus)
-    backend = AerSimulator(method=QISKIT_METHOD)
-
-    qc = _build_qiskit_circuit(
-        circuit=circuit,
-        init_statevector=init_state,
-        noise_instr=noise_instr,
-        insertions={},
-        QuantumCircuit=QuantumCircuit,
-        UnitaryGate=UnitaryGate,
-    )
-    qc.save_statevector()
-
-    result = backend.run(qc, shots=1).result()
-    state = result.data(0)["statevector"]
-    sv = state if isinstance(state, Statevector) else Statevector(state)
-    return float(np.real(sv.expectation_value(pauli_obs)))
-
-
 def pec_estimate_qiskit(
     circuit: Circuit,
     observable: str,
@@ -282,7 +263,9 @@ def pec_estimate_qiskit(
     error_locs: List[Tuple],
     beta: float,
     n_samples: int,
-    seed: int = 0
+    seed: int = 0,
+    progress: bool = False,
+    progress_desc: Optional[str] = None,
 ) -> PECEstimate:
     """
     PEC estimation with exponential window filter using Qiskit simulation.
@@ -302,7 +285,17 @@ def pec_estimate_qiskit(
     backend = AerSimulator(method=QISKIT_METHOD)
 
     estimates = np.empty(n_samples)
-    for i in range(n_samples):
+    sample_iter = range(n_samples)
+    if progress:
+        sample_iter = tqdm(
+            sample_iter,
+            desc=progress_desc or "samples",
+            leave=False,
+            ascii=True,
+            mininterval=1.0,
+        )
+
+    for i in sample_iter:
         insertions = {}
         sign = 1.0
         for v, (layer, qubit, _) in enumerate(error_locs):

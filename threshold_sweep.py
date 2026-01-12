@@ -5,6 +5,9 @@ Parameter sweep for threshold/softplus PEC hyperparameters.
 from __future__ import annotations
 
 import argparse
+import cProfile
+import io
+import pstats
 import time
 from typing import Callable, List, Optional, Tuple
 
@@ -18,7 +21,7 @@ from threshold_pec import benchmark
 console = Console()
 DEFAULT_N_QUBITS = 4
 DEFAULT_DEPTH = 4
-DEFAULT_QUBITS_RANGE = "4-8"
+DEFAULT_QUBITS_RANGE = "4-6"
 DEFAULT_DEPTHS_RANGE = "6-14:2"
 DEFAULT_MIN_VOLUME = 24
 DEFAULT_MAX_VOLUME = 64
@@ -34,15 +37,10 @@ DEFAULT_BETA_THRESHES = "0.10,0.15,0.20,0.25"
 DEFAULT_SOFTPLUS_TAUS = "0.5,1.0,2.0"
 DEFAULT_SOFTPLUS_TAU = 1.0
 DEFAULT_CONFIG_SEED_OFFSET = 1000
-RATIO_FALLBACK = 0.0
-PLACEHOLDER_W0 = 0
 RANGE_STEP_DEFAULT = 1
-RANGE_STEP_MIN = 1
-INCLUSIVE_RANGE_OFFSET = 1
-MIN_CONFIGS_PER_RATIO = 1
-NO_MAX_VOLUME = 0
-NO_MAX_CONFIGS = 0
-COMPARE_SEED_OFFSET = 1
+DEFAULT_PROFILE_OUT = "threshold_sweep.prof"
+DEFAULT_PROFILE_TOP = 30
+DEFAULT_PROFILE_SORT = "cumulative"
 
 def _parse_list(raw: str, cast: Callable) -> List:
     return [cast(x) for x in raw.split(",") if x.strip()]
@@ -64,9 +62,9 @@ def _parse_range_list(raw: str) -> List[int]:
             start_str, end_str = range_part.split("-", 1)
             start = int(start_str)
             end = int(end_str)
-            if step < RANGE_STEP_MIN:
+            if step < 1:
                 raise ValueError("Range step must be positive.")
-            values.extend(list(range(start, end + INCLUSIVE_RANGE_OFFSET, step)))
+            values.extend(list(range(start, end + 1, step)))
         else:
             values.append(int(part))
     return sorted(set(values))
@@ -108,7 +106,7 @@ def auto_configs(
                 continue
             if max_volume is not None and volume > max_volume:
                 continue
-            ratio = d / n if n else RATIO_FALLBACK
+            ratio = d / n if n else 0.0
             candidates.append((n, d, volume, ratio))
 
     if not candidates:
@@ -141,7 +139,7 @@ def auto_configs(
         ranked = sorted(candidates, key=lambda c: (c[2], c[3]))
         chosen = [(n, d) for n, d, _, _ in ranked]
 
-    if max_configs > NO_MAX_CONFIGS and len(chosen) > max_configs:
+    if max_configs > 0 and len(chosen) > max_configs:
         chosen = chosen[:max_configs]
 
     return chosen
@@ -150,11 +148,11 @@ def auto_configs(
 def _summary_from_filtered(results: List[dict]) -> dict:
     errors = np.array([d["error"] for d in results], dtype=float)
     qp_norms = np.array([d["qp_norm"] for d in results], dtype=float)
-    ess_vals = [d.get("ess") for d in results if "ess" in d]
+    ess_vals = [float(val) for val in (d.get("ess") for d in results) if val is not None]
     ess = float(np.mean(ess_vals)) if ess_vals else float("nan")
-    above_vals = [d.get("above") for d in results if "above" in d]
+    above_vals = [float(val) for val in (d.get("above") for d in results) if val is not None]
     above = float(np.mean(above_vals)) if above_vals else float("nan")
-    weight_vals = [d.get("weight_mean") for d in results if "weight_mean" in d]
+    weight_vals = [float(val) for val in (d.get("weight_mean") for d in results) if val is not None]
     weight_mean = float(np.mean(weight_vals)) if weight_vals else float("nan")
     return {
         "bias": float(np.mean(errors)),
@@ -164,6 +162,17 @@ def _summary_from_filtered(results: List[dict]) -> dict:
         "above": above,
         "weight_mean": weight_mean,
     }
+
+
+def _benchmark_count(
+    w0_densities: List[float],
+    beta_prop_values: List[float],
+    beta_thresh_values: List[float],
+    filter_type: str,
+    softplus_taus: List[float],
+) -> int:
+    tau_count = len(softplus_taus) if filter_type == "softplus" else 1
+    return 1 + len(w0_densities) * len(beta_prop_values) * len(beta_thresh_values) * tau_count
 
 
 def parameter_sweep(
@@ -178,6 +187,7 @@ def parameter_sweep(
     filter_type: str,
     softplus_taus: List[float],
     use_qiskit: bool,
+    progress: bool,
 ) -> List[dict]:
     console.rule("THRESHOLD PEC PARAMETER SWEEP")
 
@@ -197,10 +207,13 @@ def parameter_sweep(
         softplus_tau=DEFAULT_SOFTPLUS_TAU,
         use_qiskit=use_qiskit,
         w0_density=w0_densities[0],
+        progress=progress,
     )
     full_errors = np.array([d["error"] for d in data_full["results"]["full_pec"]])
     full_rmse = float(np.sqrt(np.mean(full_errors**2)))
-    full_qp_norm = float(np.mean([d["qp_norm"] for d in data_full["results"]["full_pec"]]))
+    full_qp_norm = float(
+        np.mean(np.array([d["qp_norm"] for d in data_full["results"]["full_pec"]], dtype=float))
+    )
     full_bias = float(np.mean(full_errors))
 
     results = []
@@ -255,45 +268,46 @@ def parameter_sweep(
                         softplus_tau=tau,
                         use_qiskit=use_qiskit,
                         w0_density=rho,
+                        progress=progress,
                     )
 
-                        stats = _summary_from_filtered(data["results"]["filtered"])
-                        vs_full = 100.0 * (stats["rmse"] / full_rmse - 1)
+                    stats = _summary_from_filtered(data["results"]["filtered"])
+                    vs_full = 100.0 * (stats["rmse"] / full_rmse - 1)
 
-                        row = {
-                            "w0_density": rho,
-                            "beta_prop": beta_prop,
-                            "beta_thresh": beta_thresh,
-                            "tau": tau,
-                            "qp_norm": stats["qp_norm"],
-                            "bias": stats["bias"],
-                            "rmse": stats["rmse"],
-                            "ess": stats["ess"],
-                            "vs_full": vs_full,
-                            "w0_mean": data["config"]["w0_mean"],
-                            "w0_min": data["config"]["w0_min"],
-                            "w0_max": data["config"]["w0_max"],
-                        }
-                        results.append(row)
+                    row = {
+                        "w0_density": rho,
+                        "beta_prop": beta_prop,
+                        "beta_thresh": beta_thresh,
+                        "tau": tau,
+                        "qp_norm": stats["qp_norm"],
+                        "bias": stats["bias"],
+                        "rmse": stats["rmse"],
+                        "ess": stats["ess"],
+                        "vs_full": vs_full,
+                        "w0_mean": data["config"]["w0_mean"],
+                        "w0_min": data["config"]["w0_min"],
+                        "w0_max": data["config"]["w0_max"],
+                    }
+                    results.append(row)
 
-                        row = ["softplus" if filter_type == "softplus" else "threshold", f"{rho:.2f}"]
-                        row.append(f"{data['config']['w0_mean']:.1f}")
-                        row.append(f"{beta_prop:.2f}")
-                        row.append(f"{beta_thresh:.2f}")
-                        if filter_type == "softplus":
-                            row.append(f"{tau:.2f}")
-                        row.extend(
-                            [
-                                f"{stats['qp_norm']:.2f}",
-                                f"{stats['bias']:.4f}",
-                                f"{stats['rmse']:.4f}",
-                                f"{stats['ess']:.1f}",
-                                f"{stats['weight_mean']:.2f}",
-                                f"{stats['above']:.2f}",
-                                f"{vs_full:+.1f}%",
-                            ]
-                        )
-                        table.add_row(*row)
+                    row = ["softplus" if filter_type == "softplus" else "threshold", f"{rho:.2f}"]
+                    row.append(f"{data['config']['w0_mean']:.1f}")
+                    row.append(f"{beta_prop:.2f}")
+                    row.append(f"{beta_thresh:.2f}")
+                    if filter_type == "softplus":
+                        row.append(f"{tau:.2f}")
+                    row.extend(
+                        [
+                            f"{stats['qp_norm']:.2f}",
+                            f"{stats['bias']:.4f}",
+                            f"{stats['rmse']:.4f}",
+                            f"{stats['ess']:.1f}",
+                            f"{stats['weight_mean']:.2f}",
+                            f"{stats['above']:.2f}",
+                            f"{vs_full:+.1f}%",
+                        ]
+                    )
+                    table.add_row(*row)
 
     console.print(table)
     best = min(results, key=lambda r: r["rmse"])
@@ -319,11 +333,12 @@ def compare_filters(
     n_samples: int,
     n_trials: int,
     seed: int,
-    w0_density: Optional[float],
+    w0_density: float,
     beta_prop: float,
     beta_thresh: float,
     softplus_taus: List[float],
     use_qiskit: bool,
+    progress: bool,
 ) -> None:
     console.rule("THRESHOLD vs SOFTPLUS FILTER COMPARISON")
 
@@ -339,6 +354,7 @@ def compare_filters(
         softplus_tau=DEFAULT_SOFTPLUS_TAU,
         use_qiskit=use_qiskit,
         w0_density=w0_density,
+        progress=progress,
     )
     thresh_stats = _summary_from_filtered(data_thresh["results"]["filtered"])
 
@@ -372,6 +388,7 @@ def compare_filters(
             softplus_tau=tau,
             use_qiskit=use_qiskit,
             w0_density=w0_density,
+            progress=progress,
         )
         soft_stats = _summary_from_filtered(data_soft["results"]["filtered"])
         table.add_row(
@@ -383,6 +400,134 @@ def compare_filters(
         )
 
     console.print(table)
+
+
+def _run(args: argparse.Namespace) -> None:
+    w0_densities = _parse_list(args.threshold_densities, float)
+    ratios = _parse_list(args.ratios, float)
+    if not w0_densities:
+        raise ValueError("At least one threshold density is required.")
+
+    if args.single:
+        configs = [(args.n_qubits, args.depth)]
+    elif args.configs.strip():
+        configs = _parse_configs(args.configs)
+    else:
+        qubits = _parse_range_list(args.qubits)
+        depths = _parse_range_list(args.depths)
+        configs = auto_configs(
+            qubits=qubits,
+            depths=depths,
+            min_volume=args.min_volume,
+            max_volume=args.max_volume if args.max_volume > 0 else None,
+            ratios=ratios,
+            per_ratio=max(1, args.configs_per_ratio),
+            max_configs=max(0, args.max_configs),
+        )
+    beta_prop_values = _parse_list(args.beta_props, float)
+    beta_thresh_values = _parse_list(args.beta_threshes, float)
+    softplus_taus = _parse_list(args.softplus_taus, float)
+    progress = bool(args.progress or args.profile)
+
+    benchmark_count = _benchmark_count(
+        w0_densities=w0_densities,
+        beta_prop_values=beta_prop_values,
+        beta_thresh_values=beta_thresh_values,
+        filter_type=args.filter_type,
+        softplus_taus=softplus_taus,
+    )
+
+    timing_rows = []
+    t0 = time.perf_counter()
+    if not configs:
+        raise ValueError("No configurations selected.")
+    for idx, (n_qubits, depth) in enumerate(configs):
+        if idx:
+            console.rule()
+        config_start = time.perf_counter()
+        parameter_sweep(
+            n_qubits=n_qubits,
+            depth=depth,
+            n_samples=args.n_samples,
+            n_trials=args.n_trials,
+            seed=args.seed + idx * DEFAULT_CONFIG_SEED_OFFSET,
+            w0_densities=w0_densities,
+            beta_prop_values=beta_prop_values,
+            beta_thresh_values=beta_thresh_values,
+            filter_type=args.filter_type,
+            softplus_taus=softplus_taus,
+            use_qiskit=not args.no_qiskit,
+            progress=progress,
+        )
+        elapsed = time.perf_counter() - config_start
+        if args.timings or args.profile:
+            volume = estimate_error_locs(n_qubits, depth)
+            timing_rows.append(
+                {
+                    "config": f"{n_qubits}q_d{depth}",
+                    "volume": volume,
+                    "benchmarks": benchmark_count,
+                    "total_s": elapsed,
+                }
+            )
+
+    if not args.skip_compare:
+        compare_n, compare_d = configs[0]
+        compare_filters(
+            n_qubits=compare_n,
+            depth=compare_d,
+            n_samples=args.n_samples,
+            n_trials=args.n_trials,
+            seed=args.seed + 1,
+            w0_density=w0_densities[0],
+            beta_prop=beta_prop_values[0],
+            beta_thresh=beta_thresh_values[0],
+            softplus_taus=softplus_taus,
+            use_qiskit=not args.no_qiskit,
+            progress=progress,
+        )
+
+    if timing_rows:
+        table = Table(box=box.ASCII)
+        table.add_column("Config")
+        table.add_column("Volume", justify="right")
+        table.add_column("Benchmarks", justify="right")
+        table.add_column("Total (s)", justify="right")
+        table.add_column("s/bench", justify="right")
+        table.add_column("ms/trial", justify="right")
+        table.add_column("µs/sample", justify="right")
+        for row in timing_rows:
+            per_bench = row["total_s"] / row["benchmarks"]
+            per_trial = per_bench / args.n_trials
+            per_sample = per_trial / args.n_samples
+            table.add_row(
+                row["config"],
+                f"{row['volume']}",
+                f"{row['benchmarks']}",
+                f"{row['total_s']:.2f}",
+                f"{per_bench:.3f}",
+                f"{per_trial * 1000.0:.2f}",
+                f"{per_sample * 1_000_000.0:.2f}",
+            )
+        console.rule("Timing Summary")
+        console.print(table)
+
+    console.print(f"Total time: {time.perf_counter() - t0:.1f}s")
+
+
+def _run_with_profile(args: argparse.Namespace) -> None:
+    profiler = cProfile.Profile()
+    profiler.enable()
+    _run(args)
+    profiler.disable()
+
+    profiler.dump_stats(args.profile_out)
+    stream = io.StringIO()
+    stats = pstats.Stats(profiler, stream=stream).sort_stats(args.profile_sort)
+    stats.print_stats(args.profile_top)
+    console.rule("Profile Summary")
+    console.print(stream.getvalue())
+    console.print(f"Profile saved to {args.profile_out}")
 
 
 def main() -> None:
@@ -425,69 +570,22 @@ def main() -> None:
     parser.add_argument("--softplus-taus", type=str, default=DEFAULT_SOFTPLUS_TAUS)
     parser.add_argument("--no-qiskit", action="store_true", help="Disable Qiskit simulation")
     parser.add_argument("--skip-compare", action="store_true")
+    parser.add_argument("--timings", action="store_true", help="Print per-config timing summary")
+    parser.add_argument("--progress", action="store_true", help="Show tqdm progress for trials/samples")
+    parser.add_argument("--profile", action="store_true", help="Run cProfile and print a summary")
+    parser.add_argument("--profile-out", type=str, default=DEFAULT_PROFILE_OUT)
+    parser.add_argument("--profile-top", type=int, default=DEFAULT_PROFILE_TOP)
+    parser.add_argument(
+        "--profile-sort",
+        choices=["cumulative", "tottime"],
+        default=DEFAULT_PROFILE_SORT,
+    )
     args = parser.parse_args()
 
-    w0_densities = _parse_list(args.threshold_densities, float)
-    ratios = _parse_list(args.ratios, float)
-    if not w0_densities:
-        raise ValueError("At least one threshold density is required.")
-
-    if args.single:
-        configs = [(args.n_qubits, args.depth)]
-    elif args.configs.strip():
-        configs = _parse_configs(args.configs)
+    if args.profile:
+        _run_with_profile(args)
     else:
-        qubits = _parse_range_list(args.qubits)
-        depths = _parse_range_list(args.depths)
-        configs = auto_configs(
-            qubits=qubits,
-            depths=depths,
-            min_volume=args.min_volume,
-            max_volume=args.max_volume if args.max_volume > NO_MAX_VOLUME else None,
-            ratios=ratios,
-            per_ratio=max(MIN_CONFIGS_PER_RATIO, args.configs_per_ratio),
-            max_configs=max(NO_MAX_CONFIGS, args.max_configs),
-        )
-    beta_prop_values = _parse_list(args.beta_props, float)
-    beta_thresh_values = _parse_list(args.beta_threshes, float)
-    softplus_taus = _parse_list(args.softplus_taus, float)
-
-    t0 = time.time()
-    if not configs:
-        raise ValueError("No configurations selected.")
-    for idx, (n_qubits, depth) in enumerate(configs):
-        if idx:
-            console.rule()
-        parameter_sweep(
-            n_qubits=n_qubits,
-            depth=depth,
-            n_samples=args.n_samples,
-            n_trials=args.n_trials,
-            seed=args.seed + idx * DEFAULT_CONFIG_SEED_OFFSET,
-            w0_densities=w0_densities,
-            beta_prop_values=beta_prop_values,
-            beta_thresh_values=beta_thresh_values,
-            filter_type=args.filter_type,
-            softplus_taus=softplus_taus,
-            use_qiskit=not args.no_qiskit,
-        )
-
-    if not args.skip_compare:
-        compare_n, compare_d = configs[0]
-        compare_filters(
-            n_qubits=compare_n,
-            depth=compare_d,
-            n_samples=args.n_samples,
-            n_trials=args.n_trials,
-            seed=args.seed + COMPARE_SEED_OFFSET,
-            w0_density=w0_densities[0],
-            beta_prop=beta_prop_values[0],
-            beta_thresh=beta_thresh_values[0],
-            softplus_taus=softplus_taus,
-            use_qiskit=not args.no_qiskit,
-        )
-
-    console.print(f"Total time: {time.time() - t0:.1f}s")
+        _run(args)
 
 
 if __name__ == "__main__":
