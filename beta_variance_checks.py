@@ -1,7 +1,7 @@
 """
 Variance checks for exponential-window PEC.
 
-1) Summary across random trials: mean gamma/std per beta.
+1) Summary across random trials: mean qp_norm/std per beta.
 2) Fixed instance: empirical variance vs beta and n_samples.
 """
 
@@ -32,7 +32,7 @@ def parse_int_list(raw: str) -> List[int]:
 @dataclass
 class SummaryPoint:
     beta: float
-    mean_gamma: float
+    mean_qp_norm: float
     mean_std: float
     mean_bias: float
 
@@ -47,7 +47,7 @@ class SummarySeries:
 @dataclass
 class FixedPoint:
     beta: float
-    mean_gamma: float
+    mean_qp_norm: float
     mean_bias: float
     emp_std: float
     mean_est_std: float
@@ -306,11 +306,11 @@ def run_summary(
     p_I_range,
 ) -> List[SummarySeries]:
     print("\nSUMMARY (random instances)")
-    print("config, beta, mean_gamma, mean_std, mean_bias, rmse")
+    print("config, beta, mean_qp_norm, mean_std, mean_bias, rmse")
     summary_series = []
     for n_qubits, depth in configs:
         stats: Dict[float, Dict[str, List[float]]] = {
-            b: {"gamma": [], "std": [], "bias": []} for b in betas
+            b: {"qp_norm": [], "std": [], "bias": []} for b in betas
         }
         for t in range(n_trials):
             rng = np.random.default_rng(seed + 1000 * t + 31 * n_qubits + depth)
@@ -334,24 +334,24 @@ def run_summary(
                     n_samples=n_samples,
                     seed=seed + 50000 * t + i,
                 )
-                stats[beta]["gamma"].append(float(est.gamma))
+                stats[beta]["qp_norm"].append(float(est.qp_norm))
                 stats[beta]["std"].append(float(est.std))
                 stats[beta]["bias"].append(float(est.mean - ideal))
 
         for beta in betas:
-            gammas = np.array(stats[beta]["gamma"])
+            qp_norms = np.array(stats[beta]["qp_norm"])
             stds = np.array(stats[beta]["std"])
             biases = np.array(stats[beta]["bias"])
-            mean_gamma = float(gammas.mean())
+            mean_qp_norm = float(qp_norms.mean())
             mean_std = float(stds.mean())
             mean_bias = float(biases.mean())
             rmse = float(np.sqrt(np.mean(biases ** 2)))
             label = f"{n_qubits}q_d{depth}"
-            print(f"{label}, {beta:.4f}, {mean_gamma:.3f}, {mean_std:.6f}, {mean_bias:.6f}, {rmse:.6f}")
+            print(f"{label}, {beta:.4f}, {mean_qp_norm:.3f}, {mean_std:.6f}, {mean_bias:.6f}, {rmse:.6f}")
         points = [
             SummaryPoint(
                 beta=b,
-                mean_gamma=float(np.mean(stats[b]["gamma"])),
+                mean_qp_norm=float(np.mean(stats[b]["qp_norm"])),
                 mean_std=float(np.mean(stats[b]["std"])),
                 mean_bias=float(np.mean(stats[b]["bias"])),
             )
@@ -382,7 +382,7 @@ def run_fixed_instance(
 
     print("\nFIXED INSTANCE")
     print(f"config={n_qubits}q_d{depth}, seed={seed}")
-    print("n_samples, beta, mean_gamma, mean_bias, emp_std, mean_est_std, emp_rmse")
+    print("n_samples, beta, mean_qp_norm, mean_bias, emp_std, mean_est_std, emp_rmse")
 
     fixed_series = []
     for n_samples in n_samples_list:
@@ -390,7 +390,7 @@ def run_fixed_instance(
         for beta in betas:
             ests = []
             stds = []
-            gammas = []
+            qp_norms = []
             for r in range(n_repeats):
                 est = pec_estimate_qiskit(
                     circuit,
@@ -404,24 +404,24 @@ def run_fixed_instance(
                 )
                 ests.append(float(est.mean))
                 stds.append(float(est.std))
-                gammas.append(float(est.gamma))
+                qp_norms.append(float(est.qp_norm))
 
             ests_arr = np.array(ests)
             errors = ests_arr - ideal
-            mean_gamma = float(np.mean(gammas))
+            mean_qp_norm = float(np.mean(qp_norms))
             mean_bias = float(np.mean(errors))
             emp_std = float(np.std(errors, ddof=1)) if len(errors) > 1 else 0.0
             mean_est_std = float(np.mean(stds))
             emp_rmse = float(np.sqrt(np.mean(errors ** 2)))
 
             print(
-                f"{n_samples}, {beta:.4f}, {mean_gamma:.3f}, "
+                f"{n_samples}, {beta:.4f}, {mean_qp_norm:.3f}, "
                 f"{mean_bias:.6f}, {emp_std:.6f}, {mean_est_std:.6f}, {emp_rmse:.6f}"
             )
             points.append(
                 FixedPoint(
                     beta=beta,
-                    mean_gamma=mean_gamma,
+                    mean_qp_norm=mean_qp_norm,
                     mean_bias=mean_bias,
                     emp_std=emp_std,
                     mean_est_std=mean_est_std,
@@ -494,9 +494,9 @@ def main() -> None:
         )
         write_facets_metric_svg(
             summary_series,
-            lambda p: p.mean_gamma,
-            "Mean gamma",
-            f"{args.out_prefix}_summary_gamma.svg",
+            lambda p: p.mean_qp_norm,
+            "Mean qp_norm",
+            f"{args.out_prefix}_summary_qp_norm.svg",
             title,
             cols=args.cols,
         )
@@ -517,7 +517,7 @@ def main() -> None:
             cols=args.cols,
         )
         print(
-            f"Wrote {args.out_prefix}_summary_gamma.svg, "
+            f"Wrote {args.out_prefix}_summary_qp_norm.svg, "
             f"{args.out_prefix}_summary_std.svg, "
             f"{args.out_prefix}_summary_bias.svg"
         )

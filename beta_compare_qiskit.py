@@ -91,7 +91,7 @@ def run_trials(
                 seed=seed + 1000 * t + i,
             )
             bias = est.mean - ideal
-            eff = n_samples / (est.gamma ** 2)
+            eff = n_samples / (est.qp_norm ** 2)
             biases[beta].append(float(bias))
             eff_samples[beta].append(float(eff))
 
@@ -191,7 +191,7 @@ def write_svg_scatter(stats: List[BetaStats], out_path: str, title: str) -> None
     # Axis labels
     parts.append(
         f'<text x="{x0 + plot_w/2:.1f}" y="{height-25}" text-anchor="middle" '
-        f'font-family="Arial" font-size="14" fill="#222">Effective samples (n_samples / gamma^2)</text>'
+        f'font-family="Arial" font-size="14" fill="#222">Effective samples (n_samples / qp_norm^2)</text>'
     )
     parts.append(
         f'<text x="22" y="{margin["top"] + plot_h/2:.1f}" text-anchor="middle" '

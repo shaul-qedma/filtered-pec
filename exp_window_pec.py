@@ -19,9 +19,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from pec_shared import (
-    ETA, STANDARD_GATES, NoisySimulator, Circuit,
-    error_locations, random_circuit, random_noise_model,
-    random_product_state, random_observable
+    ETA, NoisySimulator, Circuit
 )
 
 
@@ -53,12 +51,6 @@ def exp_window_quasi_prob(p: np.ndarray, beta: float) -> np.ndarray:
     
     return 0.25 * (ETA @ h)
 
-
-def gamma(q: np.ndarray) -> float:
-    """Sampling overhead γ = ||q||₁"""
-    return np.abs(q).sum()
-
-
 # =============================================================================
 # PEC ESTIMATOR
 # =============================================================================
@@ -71,12 +63,12 @@ class PECEstimate:
     Attributes:
         mean: Estimated expectation value
         std: Standard error of the mean
-        gamma: Total sampling overhead Π_v γ_v
+        qp_norm: Total sampling overhead Π_v qp_norm_v
         n_samples: Number of samples used
     """
     mean: float
     std: float
-    gamma: float
+    qp_norm: float
     n_samples: int
 
 
@@ -104,19 +96,19 @@ def pec_estimate(
         seed: Random seed for reproducibility
     
     Returns:
-        PECEstimate with mean, std, gamma, n_samples
+        PECEstimate with mean, std, qp_norm, n_samples
     """
     rng = np.random.default_rng(seed)
     
     # Compute local quasi-probabilities at each error location
     local_q = [exp_window_quasi_prob(p, beta) for (_, _, p) in error_locs]
     
-    # Total γ = Π_v ||q_v||₁
-    local_gamma = [gamma(q) for q in local_q]
-    total_gamma = np.prod(local_gamma)
+    # Total qp_norm = Π_v ||q_v||₁
+    local_qp_norm = [np.abs(q).sum() for q in local_q]
+    total_qp_norm = np.prod(local_qp_norm)
     
-    # Sampling distributions: π_v[s] = |q_v[s]| / γ_v
-    sampling_probs = [np.abs(q) / g for q, g in zip(local_q, local_gamma)]
+    # Sampling distributions: π_v[s] = |q_v[s]| / qp_norm_v
+    sampling_probs = [np.abs(q) / g for q, g in zip(local_q, local_qp_norm)]
     sampling_signs = [np.sign(q) for q in local_q]
     
     # Monte Carlo sampling
@@ -135,11 +127,11 @@ def pec_estimate(
         # Run noisy simulation with insertions, weight by sign
         estimates[i] = sign * sim.run(circuit, observable, initial_state, insertions)
     
-    # PEC estimate: γ × mean(raw estimates)
-    mean = total_gamma * estimates.mean()
-    std = total_gamma * estimates.std() / np.sqrt(n_samples)
+    # PEC estimate: qp_norm × mean(raw estimates)
+    mean = total_qp_norm * estimates.mean()
+    std = total_qp_norm * estimates.std() / np.sqrt(n_samples)
     
-    return PECEstimate(mean=mean, std=std, gamma=float(total_gamma), n_samples=n_samples)
+    return PECEstimate(mean=mean, std=std, qp_norm=float(total_qp_norm), n_samples=n_samples)
 
 
 # =============================================================================
@@ -279,9 +271,9 @@ def pec_estimate_qiskit(
 
     rng = np.random.default_rng(seed)
     local_q = [exp_window_quasi_prob(p, beta) for (_, _, p) in error_locs]
-    local_gamma = [gamma(q) for q in local_q]
-    total_gamma = np.prod(local_gamma)
-    sampling_probs = [np.abs(q) / g for q, g in zip(local_q, local_gamma)]
+    local_qp_norm = [np.abs(q).sum() for q in local_q]
+    total_qp_norm = np.prod(local_qp_norm)
+    sampling_probs = [np.abs(q) / g for q, g in zip(local_q, local_qp_norm)]
     sampling_signs = [np.sign(q) for q in local_q]
 
     init_state = _to_qiskit_statevector(initial_state, circuit.n_qubits)
@@ -314,9 +306,9 @@ def pec_estimate_qiskit(
         dm = DensityMatrix(rho)
         estimates[i] = sign * np.real(dm.expectation_value(pauli_obs))
 
-    mean = total_gamma * estimates.mean()
-    std = total_gamma * estimates.std() / np.sqrt(n_samples)
-    return PECEstimate(mean=mean, std=std, gamma=float(total_gamma), n_samples=n_samples)
+    mean = total_qp_norm * estimates.mean()
+    std = total_qp_norm * estimates.std() / np.sqrt(n_samples)
+    return PECEstimate(mean=mean, std=std, qp_norm=float(total_qp_norm), n_samples=n_samples)
 
 
 # =============================================================================
@@ -351,80 +343,5 @@ def verify_beta_zero_is_full_pec():
     
     print()
 
-
-def demo_beta_effect():
-    """Demonstrate effect of β on quasi-probabilities."""
-    print("Effect of β on quasi-probabilities")
-    print("=" * 50)
-    
-    p = np.array([0.90, 0.05, 0.03, 0.02])  # Asymmetric noise
-    print(f"Noise: p = {p}")
-    print(f"Eigenvalues: η·p = {(ETA @ p).round(4)}")
-    print()
-    
-    print(f"{'β':<6} {'q[I]':>8} {'q[X]':>8} {'q[Y]':>8} {'q[Z]':>8} {'γ':>8} {'all≥0':>8}")
-    print("-" * 60)
-    
-    for beta in [0.0, 0.05, 0.10, 0.15, 0.20, 0.30]:
-        q = exp_window_quasi_prob(p, beta)
-        g = gamma(q)
-        nonneg = "yes" if np.all(q >= -1e-10) else "no"
-        print(f"{beta:<6.2f} {q[0]:>8.4f} {q[1]:>8.4f} {q[2]:>8.4f} {q[3]:>8.4f} {g:>8.4f} {nonneg:>8}")
-    
-    print()
-
-
-def benchmark():
-    """Compare Full PEC vs Exponential Window on random circuits."""
-    print("Benchmark: Full PEC vs Exponential Window")
-    print("=" * 50)
-    
-    rng = np.random.default_rng(42)
-    n_samples = 500
-    n_trials = 10
-    
-    configs = [
-        (3, 2),  # 3 qubits, depth 2
-        (4, 2),  # 4 qubits, depth 2
-        (4, 3),  # 4 qubits, depth 3
-    ]
-    
-    for n_qubits, depth in configs:
-        print(f"\n{n_qubits} qubits, depth {depth}")
-        print("-" * 40)
-        
-        results = {beta: [] for beta in [0.0, 0.1, 0.2]}
-        
-        for trial in range(n_trials):
-            # Generate random instance
-            circuit = random_circuit(n_qubits, depth, rng)
-            noise = random_noise_model(rng)
-            sim = NoisySimulator(STANDARD_GATES, noise)
-            init = random_product_state(n_qubits, rng)
-            obs = random_observable(n_qubits, rng)
-            locs = error_locations(circuit, noise)
-            
-            ideal = sim.ideal(circuit, obs, init)
-            
-            for beta in results.keys():
-                est = pec_estimate(sim, circuit, obs, init, locs, beta, n_samples, seed=trial)
-                error = est.mean - ideal
-                results[beta].append({
-                    'error': error,
-                    'gamma': est.gamma,
-                })
-        
-        # Print summary
-        print(f"{'β':<6} {'γ':>10} {'|Bias|':>12} {'RMSE':>12}")
-        for beta, data in results.items():
-            errors = np.array([d['error'] for d in data])
-            gammas = np.array([d['gamma'] for d in data])
-            bias = np.abs(errors.mean())
-            rmse = np.sqrt((errors**2).mean())
-            print(f"{beta:<6.1f} {gammas.mean():>10.2f} {bias:>12.5f} {rmse:>12.5f}")
-
-
 if __name__ == "__main__":
     verify_beta_zero_is_full_pec()
-    demo_beta_effect()
-    benchmark()

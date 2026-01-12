@@ -8,36 +8,36 @@ NOTATION & METRICS
 ------------------
 For quasi-probability q'(s), define:
 
-  γ (gamma) := ||q'||_1 = Σ_s |q'(s)|
+  qp_norm := ||q'||_1 = Σ_s |q'(s)|
   
   This is the L1 norm of the quasi-probability distribution.
-  For true probability distributions, γ = 1.
-  For quasi-probabilities with negative values, γ > 1.
+  For true probability distributions, qp_norm = 1.
+  For quasi-probabilities with negative values, qp_norm > 1.
 
 The PEC estimator is:
   
-  Ô = γ × (1/N) Σᵢ sign(q'(sᵢ)) × O(sᵢ)
+  Ô = qp_norm × (1/N) Σᵢ sign(q'(sᵢ)) × O(sᵢ)
 
-where sᵢ ~ |q'|/γ (sampling from normalized absolute values).
+where sᵢ ~ |q'|/qp_norm (sampling from normalized absolute values).
 
 ERROR DECOMPOSITION
 -------------------
   Bias     := E[Ô] - O_ideal           (systematic error)
-  Variance := Var[Ô] = γ² × Var[raw] / N  (statistical error)
+  Variance := Var[Ô] = qp_norm² × Var[raw] / N  (statistical error)
   RMSE     := √(Bias² + Variance)      (total error)
 
-The key insight: Variance scales as γ²/N, so:
+The key insight: Variance scales as qp_norm²/N, so:
   
-  Effective Samples := N / γ²
+  Effective Samples := N / qp_norm²
 
 This is the equivalent number of unweighted samples.
 
 FILTERS COMPARED
 ----------------
-  Full PEC:     H(σ) = Λ(σ)⁻¹              (unbiased, high γ)
-  Exp(β):       H(σ) = Λ(σ)⁻¹ e^{-β|σ|}   (biased, low γ)
-  Tikhonov(α):  H(σ) = (Λ(σ) + α)⁻¹       (biased, medium γ)
-  Natural(w):   H(σ) = Λ(σ)⁻¹ for |σ|≤w   (truncated, high γ)
+  Full PEC:     H(σ) = Λ(σ)⁻¹              (unbiased, high qp_norm)
+  Exp(β):       H(σ) = Λ(σ)⁻¹ e^{-β|σ|}   (biased, low qp_norm)
+  Tikhonov(α):  H(σ) = (Λ(σ) + α)⁻¹       (biased, medium qp_norm)
+  Natural(w):   H(σ) = Λ(σ)⁻¹ for |σ|≤w   (truncated, high qp_norm)
   Modified(w):  H(σ) = Λ(σ)⁻¹ for |σ|≤w, else 1
 """
 
@@ -63,7 +63,7 @@ def filter_full(p: np.ndarray) -> np.ndarray:
     """
     Full PEC: H(σ) = Λ(σ)⁻¹
     
-    Unbiased but high γ due to negative quasi-probabilities.
+    Unbiased but high qp_norm due to negative quasi-probabilities.
     
     Local filter: h_v(σ_v) = λ_v(σ_v)⁻¹
     Local quasi-prob: q_v(s) = (1/4) Σ_{σ_v} h_v(σ_v) η[s,σ_v]
@@ -78,7 +78,7 @@ def filter_exp(beta: float) -> Callable:
     Exponential window: H(σ) = Λ(σ)⁻¹ × e^{-β|σ|}
     
     Suppresses high-weight corrections exponentially.
-    For β ≥ β_crit ≈ 1-λ, all quasi-probs become non-negative → γ = 1.
+    For β ≥ β_crit ≈ 1-λ, all quasi-probs become non-negative → qp_norm = 1.
     
     Local filter: h_v(σ_v) = e^{-β·𝟙[σ_v≠0]} / λ_v(σ_v)
     """
@@ -98,7 +98,7 @@ def filter_tikhonov(alpha: float) -> Callable:
     Local Tikhonov regularization: H(σ) = Π_v (λ_v(σ_v) + α)⁻¹
     
     Adds regularization α to each eigenvalue before inversion.
-    Reduces γ but introduces bias at all weights including σ=0.
+    Reduces qp_norm but introduces bias at all weights including σ=0.
     
     Local filter: h_v(σ_v) = (λ_v(σ_v) + α)⁻¹
     """
@@ -163,13 +163,13 @@ class PECResult:
     Result of PEC estimation.
     
     Attributes:
-        estimate: γ × mean(raw), the PEC estimate
-        gamma: ||q'||_1, the L1 norm of quasi-probability
-        raw_variance: Var[sign(q') × O], variance before γ scaling
+        estimate: qp_norm × mean(raw), the PEC estimate
+        qp_norm: ||q'||_1, the L1 norm of quasi-probability
+        raw_variance: Var[sign(q') × O], variance before qp_norm scaling
         time: Wall-clock time in seconds
     """
     estimate: float
-    gamma: float
+    qp_norm: float
     raw_variance: float
     time: float
 
@@ -192,7 +192,7 @@ def pec_product_filter(sim: NoisySimulator, circuit: Circuit, obs: str,
         seed: Random seed for reproducibility
     
     Returns:
-        PECResult with estimate, gamma, raw_variance, time
+        PECResult with estimate, qp_norm, raw_variance, time
     """
     t0 = time.time()
     rng = np.random.default_rng(seed)
@@ -200,9 +200,9 @@ def pec_product_filter(sim: NoisySimulator, circuit: Circuit, obs: str,
     # Compute local quasi-probabilities q_v(s) for each error location
     qp_list = [local_filter(p) for (_, _, p) in locs]
     
-    # γ = ||q'||_1 = Π_v ||q_v||_1 (product of local L1 norms)
+    # qp_norm = ||q'||_1 = Π_v ||q_v||_1 (product of local L1 norms)
     local_norms = [np.abs(qp).sum() for qp in qp_list]
-    gamma = np.prod(local_norms)
+    qp_norm = np.prod(local_norms)
     
     # Sampling distribution: π_v(s) = |q_v(s)| / ||q_v||_1
     sampling_probs = [np.abs(qp) / norm for qp, norm in zip(qp_list, local_norms)]
@@ -221,8 +221,8 @@ def pec_product_filter(sim: NoisySimulator, circuit: Circuit, obs: str,
         raw_estimates[i] = sign * sim.run(circuit, obs, init, insertions)
     
     return PECResult(
-        estimate=gamma * raw_estimates.mean(),
-        gamma=float(gamma),
+        estimate=qp_norm * raw_estimates.mean(),
+        qp_norm=float(qp_norm),
         raw_variance=raw_estimates.var(),
         time=time.time() - t0
     )
@@ -271,12 +271,12 @@ def pec_global_filter(sim: NoisySimulator, circuit: Circuit, obs: str,
         
         configs.append((s, val * (0.25 ** n)))
     
-    # γ = ||q'||_1 = Σ_s |q'(s)|
+    # qp_norm = ||q'||_1 = Σ_s |q'(s)|
     abs_vals = np.array([abs(v) for _, v in configs])
-    gamma = abs_vals.sum()
+    qp_norm = abs_vals.sum()
     
-    # Sampling distribution: π(s) = |q'(s)| / γ
-    sampling_probs = abs_vals / gamma
+    # Sampling distribution: π(s) = |q'(s)| / qp_norm
+    sampling_probs = abs_vals / qp_norm
     sampling_signs = np.array([1 if v >= 0 else -1 for _, v in configs])
     
     # Monte Carlo sampling
@@ -288,8 +288,8 @@ def pec_global_filter(sim: NoisySimulator, circuit: Circuit, obs: str,
         raw_estimates[i] = sampling_signs[idx] * sim.run(circuit, obs, init, insertions)
     
     return PECResult(
-        estimate=gamma * raw_estimates.mean(),
-        gamma=gamma,
+        estimate=qp_norm * raw_estimates.mean(),
+        qp_norm=qp_norm,
         raw_variance=raw_estimates.var(),
         time=time.time() - t0
     )
@@ -303,7 +303,7 @@ def run_trial(n_qubits: int, depth: int, n_samples: int, seed: int) -> dict:
     """
     Run single trial: generate random instance, run all filters, compare to ideal.
     
-    Returns dict with results for each filter including bias, variance, gamma.
+    Returns dict with results for each filter including bias, variance, qp_norm.
     """
     rng = np.random.default_rng(seed)
     
@@ -337,13 +337,13 @@ def run_trial(n_qubits: int, depth: int, n_samples: int, seed: int) -> dict:
         r = pec_product_filter(sim, circuit, obs, init, locs, filt, n_samples, seed)
         
         bias = r.estimate - ideal
-        # Var[Ô] = γ² × Var[raw] / N
-        variance = (r.gamma ** 2) * r.raw_variance / n_samples
+        # Var[Ô] = qp_norm² × Var[raw] / N
+        variance = (r.qp_norm ** 2) * r.raw_variance / n_samples
         
         results[name] = {
             'bias': bias,
             'variance': variance,
-            'gamma': r.gamma,
+            'qp_norm': r.qp_norm,
         }
     
     # -------------------------------------------------------------------------
@@ -361,12 +361,12 @@ def run_trial(n_qubits: int, depth: int, n_samples: int, seed: int) -> dict:
             r = pec_global_filter(sim, circuit, obs, init, locs, filt, w, n_samples, seed)
             
             bias = r.estimate - ideal
-            variance = (r.gamma ** 2) * r.raw_variance / n_samples
+            variance = (r.qp_norm ** 2) * r.raw_variance / n_samples
             
             results[name] = {
                 'bias': bias,
                 'variance': variance,
-                'gamma': r.gamma,
+                'qp_norm': r.qp_norm,
             }
     
     return results
@@ -377,7 +377,7 @@ def run_benchmark(n_qubits: int, depth: int, n_samples: int,
     """
     Run benchmark: multiple trials, aggregate statistics.
     
-    Returns summary dict with mean bias, variance, gamma, RMSE for each filter.
+    Returns summary dict with mean bias, variance, qp_norm, RMSE for each filter.
     """
     all_results = [run_trial(n_qubits, depth, n_samples, seed + t) 
                    for t in range(n_trials)]
@@ -401,22 +401,22 @@ def run_benchmark(n_qubits: int, depth: int, n_samples: int,
         
         biases = np.array([d['bias'] for d in data])
         variances = np.array([d['variance'] for d in data])
-        gammas = np.array([d['gamma'] for d in data])
+        qp_norms = np.array([d['qp_norm'] for d in data])
         
         mean_bias = np.mean(biases)
         mean_var = np.mean(variances)
-        mean_gamma = np.mean(gammas)
+        mean_qp_norm = np.mean(qp_norms)
         
         # RMSE = √(Bias² + Variance)
         rmse = np.sqrt(mean_bias**2 + mean_var)
         
-        # Effective samples = N / γ²
-        eff_samples = n_samples / np.mean(gammas**2)
+        # Effective samples = N / qp_norm²
+        eff_samples = n_samples / np.mean(qp_norms**2)
         
         summary[name] = {
             'bias': mean_bias,
             'variance': mean_var,
-            'gamma': mean_gamma,
+            'qp_norm': mean_qp_norm,
             'rmse': rmse,
             'eff_samples': eff_samples,
         }
@@ -432,7 +432,7 @@ def print_summary(config: tuple, summary: dict):
     print(f"{nq} qubits, depth {d}, {summary['n_locs']} error locations")
     print(f"{ns} samples × {nt} trials")
     print(f"{'='*85}")
-    print(f"{'Filter':<18} {'γ':>8} {'N_eff':>10} {'|Bias|':>10} {'√Var':>10} {'RMSE':>10}")
+    print(f"{'Filter':<18} {'qp_norm':>8} {'N_eff':>10} {'|Bias|':>10} {'√Var':>10} {'RMSE':>10}")
     print("-" * 70)
     
     # Extract filter results, sort by RMSE
@@ -442,7 +442,7 @@ def print_summary(config: tuple, summary: dict):
     
     for name, stats in filters:
         print(f"{name:<18} "
-              f"{stats['gamma']:>8.2f} "
+              f"{stats['qp_norm']:>8.2f} "
               f"{stats['eff_samples']:>10.1f} "
               f"{abs(stats['bias']):>10.5f} "
               f"{np.sqrt(stats['variance']):>10.5f} "
@@ -481,8 +481,8 @@ def main():
     print("AGGREGATE RESULTS ACROSS ALL CONFIGURATIONS")
     print("=" * 85)
     print("""
-    γ (gamma)   = ||q'||_1, L1 norm of quasi-probability
-    N_eff       = N / γ², effective sample count  
+    qp_norm       = ||q'||_1, L1 norm of quasi-probability
+    N_eff       = N / qp_norm², effective sample count  
     |Bias|      = |E[Ô] - O_ideal|, systematic error
     √Var        = √Var[Ô], statistical error (std dev)
     RMSE        = √(Bias² + Var), total error
@@ -495,30 +495,30 @@ def main():
                            if k not in ['n_locs', 'n_samples', 'n_trials'])
     
     # Compute averages across configurations
-    print(f"{'Filter':<18} {'Avg γ':>8} {'Avg |Bias|':>12} {'Avg √Var':>12} {'Avg RMSE':>12}")
+    print(f"{'Filter':<18} {'Avg qp_norm':>8} {'Avg |Bias|':>12} {'Avg √Var':>12} {'Avg RMSE':>12}")
     print("-" * 65)
     
     method_stats = []
     for name in filter_names:
         data = [s[name] for _, s in all_summaries if name in s]
         if data:
-            avg_gamma = np.mean([d['gamma'] for d in data])
+            avg_qp_norm = np.mean([d['qp_norm'] for d in data])
             avg_bias = np.mean([abs(d['bias']) for d in data])
             avg_std = np.mean([np.sqrt(d['variance']) for d in data])
             avg_rmse = np.mean([d['rmse'] for d in data])
-            method_stats.append((name, avg_gamma, avg_bias, avg_std, avg_rmse))
+            method_stats.append((name, avg_qp_norm, avg_bias, avg_std, avg_rmse))
     
     # Sort by RMSE
     method_stats.sort(key=lambda x: x[4])
     
-    for name, gamma, bias, std, rmse in method_stats:
-        print(f"{name:<18} {gamma:>8.2f} {bias:>12.5f} {std:>12.5f} {rmse:>12.5f}")
+    for name, qp_norm, bias, std, rmse in method_stats:
+        print(f"{name:<18} {qp_norm:>8.2f} {bias:>12.5f} {std:>12.5f} {rmse:>12.5f}")
     
     # =========================================================================
     # PARETO FRONTIER
     # =========================================================================
     print("\n" + "-" * 65)
-    print("PARETO FRONTIER (non-dominated in RMSE vs γ):")
+    print("PARETO FRONTIER (non-dominated in RMSE vs qp_norm):")
     print("-" * 65)
     
     pareto = []
@@ -527,32 +527,32 @@ def main():
         if not is_dominated:
             pareto.append(m)
     
-    for name, gamma, _, _, rmse in sorted(pareto, key=lambda x: x[1]):
-        print(f"  {name:<18} γ = {gamma:.2f}, RMSE = {rmse:.5f}")
+    for name, qp_norm, _, _, rmse in sorted(pareto, key=lambda x: x[1]):
+        print(f"  {name:<18} qp_norm = {qp_norm:.2f}, RMSE = {rmse:.5f}")
     
     # =========================================================================
     # COMPARISON TO FULL PEC
     # =========================================================================
     full_pec = next(m for m in method_stats if m[0] == 'Full PEC')
-    full_gamma, full_rmse = full_pec[1], full_pec[4]
+    full_qp_norm, full_rmse = full_pec[1], full_pec[4]
     
     print("\n" + "-" * 65)
-    print(f"COMPARISON TO FULL PEC (γ = {full_gamma:.2f}, RMSE = {full_rmse:.5f}):")
+    print(f"COMPARISON TO FULL PEC (qp_norm = {full_qp_norm:.2f}, RMSE = {full_rmse:.5f}):")
     print("-" * 65)
     
     print("\nFilters with LOWER RMSE (better accuracy):")
-    for name, gamma, _, _, rmse in method_stats:
+    for name, qp_norm, _, _, rmse in method_stats:
         if rmse < full_rmse:
             rmse_change = (rmse / full_rmse - 1) * 100
-            gamma_change = (gamma / full_gamma - 1) * 100
-            print(f"  {name:<18} RMSE {rmse_change:+.1f}%, γ {gamma_change:+.1f}%")
+            qp_norm_change = (qp_norm / full_qp_norm - 1) * 100
+            print(f"  {name:<18} RMSE {rmse_change:+.1f}%, qp_norm {qp_norm_change:+.1f}%")
     
-    print("\nFilters with LOWER γ (lower variance per sample):")
-    for name, gamma, _, _, rmse in method_stats:
-        if gamma < full_gamma:
+    print("\nFilters with LOWER qp_norm (lower variance per sample):")
+    for name, qp_norm, _, _, rmse in method_stats:
+        if qp_norm < full_qp_norm:
             rmse_change = (rmse / full_rmse - 1) * 100
-            gamma_change = (gamma / full_gamma - 1) * 100
-            print(f"  {name:<18} γ {gamma_change:+.1f}%, RMSE {rmse_change:+.1f}%")
+            qp_norm_change = (qp_norm / full_qp_norm - 1) * 100
+            print(f"  {name:<18} qp_norm {qp_norm_change:+.1f}%, RMSE {rmse_change:+.1f}%")
 
 
 if __name__ == "__main__":

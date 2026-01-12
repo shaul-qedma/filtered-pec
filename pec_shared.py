@@ -154,6 +154,7 @@ def random_circuit(n_qubits, depth, rng, twoq_gate_names=None):
         layers.append(layer)
     return Circuit(n_qubits, layers)
 
+
 def random_noise_model(rng, p_I_range=(0.85, 0.95), gate_names=None) -> dict[str, tuple]:
     """
     Random per-gate Pauli noise model.

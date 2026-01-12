@@ -4,7 +4,7 @@ Block Gibbs sampling for non-product threshold filters with Qiskit benchmarks.
 We sample from pi(sigma) proportional to |q(sigma)| * h(|sigma|) using block Gibbs
 updates, then estimate:
     E = Z_h * mean(sign(sigma) * O_sigma)
-where Z_h = sum_sigma |q(sigma)| h(|sigma|) = gamma_total * E_base[h(|sigma|)].
+where Z_h = sum_sigma |q(sigma)| h(|sigma|) = qp_norm_total * E_base[h(|sigma|)].
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ class BlockGibbsSampler:
 class GibbsPECEstimate:
     mean: float
     std: float
-    gamma: float
+    qp_norm: float
     z_h: float
     n_samples: int
     weight_mean: float
@@ -150,23 +150,23 @@ def _local_quasi_data(
     q_list = [exp_window_quasi_prob(p, beta=0.0) for (_, _, p) in error_locs]
     q_arr = np.array(q_list, dtype=float)
     abs_q = np.abs(q_arr)
-    gamma = abs_q.sum(axis=1)
-    base_probs = abs_q / gamma[:, None]
+    qp_norm = abs_q.sum(axis=1)
+    base_probs = abs_q / qp_norm[:, None]
     signs = np.sign(q_arr)
-    return base_probs, signs, gamma, abs_q
+    return base_probs, signs, qp_norm, abs_q
 
 
 def _normalizer_from_base(
     base_probs: np.ndarray,
-    gamma: np.ndarray,
+    qp_norm: np.ndarray,
     h_target: Callable[[int], float],
 ) -> Tuple[float, float]:
     p_nonid = 1.0 - base_probs[:, 0]
     pmf = _weight_pmf(p_nonid)
     weights = np.arange(len(pmf))
     e_h = float(np.sum(pmf * np.array([h_target(int(w)) for w in weights])))
-    gamma_total = float(np.prod(gamma)) if gamma.size else 1.0
-    return gamma_total * e_h, e_h
+    qp_norm_total = float(np.prod(qp_norm)) if qp_norm.size else 1.0
+    return qp_norm_total * e_h, e_h
 
 
 def gibbs_pec_estimate_qiskit(
@@ -210,15 +210,15 @@ def gibbs_pec_estimate_qiskit(
         return GibbsPECEstimate(
             mean=z_h * base_val,
             std=0.0,
-            gamma=1.0,
+            qp_norm=1.0,
             z_h=z_h,
             n_samples=n_samples,
             weight_mean=0.0,
             weight_std=0.0,
         )
 
-    base_probs, signs, gamma, _ = _local_quasi_data(error_locs)
-    z_h, _ = _normalizer_from_base(base_probs, gamma, h_target)
+    base_probs, signs, qp_norm, _ = _local_quasi_data(error_locs)
+    z_h, _ = _normalizer_from_base(base_probs, qp_norm, h_target)
 
     rng = np.random.default_rng(seed)
     sampler = BlockGibbsSampler(base_probs, h_target, block_size, rng)
@@ -280,11 +280,11 @@ def gibbs_pec_estimate_qiskit(
     else:
         weight_std = 0.0
 
-    gamma_total = float(np.prod(gamma)) if gamma.size else 1.0
+    qp_norm_total = float(np.prod(qp_norm)) if qp_norm.size else 1.0
     return GibbsPECEstimate(
         mean=float(mean),
         std=float(std),
-        gamma=float(gamma_total),
+        qp_norm=float(qp_norm_total),
         z_h=float(z_h),
         n_samples=n_samples,
         weight_mean=float(weight_mean),
