@@ -204,77 +204,87 @@ class QiskitStatevector(Backend):
         return values
 
 
-class QsimCirq(Backend):
-    """Google qsim backend via Cirq (fastest CPU simulator)."""
-    
+class CirqSimulator(Backend):
+    """Cirq density-matrix simulation backend."""
+
     def __init__(self, n_threads: int = 0):
-        self.n_threads = n_threads  # 0 = use all available
+        self.n_threads = n_threads  # Thread control not exposed by Cirq simulator.
         self._cirq = None
         self._simulator = None
         self._kraus_cache: Dict[int, dict] = {}
-    
+
     def _ensure_cirq(self):
-        """Lazy import of Cirq and qsim."""
+        """Lazy import of Cirq."""
         if self._cirq is not None:
             return
-        
+
         try:
             import cirq
-            import qsimcirq
         except ImportError as exc:
-            raise ImportError(
-                "cirq and qsimcirq required. Install with: pip install cirq qsimcirq"
-            ) from exc
-        
+            raise ImportError("cirq required. Install with: pip install cirq") from exc
+
         self._cirq = cirq
-        
-        # Configure qsim with thread count
-        options = qsimcirq.QSimOptions(
-            cpu_threads=self.n_threads if self.n_threads > 0 else 0,
-            verbosity=0,
-        )
-        self._simulator = qsimcirq.QSimSimulator(options)
-    
+        if not hasattr(cirq, "DensityMatrixSimulator"):
+            raise RuntimeError("Cirq DensityMatrixSimulator unavailable; upgrade Cirq.")
+        self._simulator = cirq.DensityMatrixSimulator()
+
+    def _make_kraus_channel(self, ops: List[np.ndarray], key: str):
+        self._ensure_cirq()
+        cirq = self._cirq
+        try:
+            return cirq.KrausChannel(ops, key=key)
+        except TypeError:
+            return cirq.KrausChannel(ops)
+
     def _get_kraus_ops(self, noise: dict) -> dict:
         """Convert noise model to Cirq Kraus channels (cached)."""
         if not noise:
             return {}
-        
+
         noise_id = id(noise)
         if noise_id in self._kraus_cache:
             return self._kraus_cache[noise_id]
-        
+
         self._ensure_cirq()
-        cirq = self._cirq
-        
+
         channels = {}
         for gate, (k1, k2) in noise.items():
-            # Convert numpy arrays to Cirq KrausChannel
             channels[gate] = (
-                cirq.KrausChannel(list(k1), key=f"{gate}_q0"),
-                cirq.KrausChannel(list(k2), key=f"{gate}_q1"),
+                self._make_kraus_channel(list(k1), f"{gate}_q0"),
+                self._make_kraus_channel(list(k2), f"{gate}_q1"),
             )
-        
+
         self._kraus_cache[noise_id] = channels
         return channels
-    
+
     def _to_cirq_state(self, state: np.ndarray, n_qubits: int) -> np.ndarray:
-        """Convert state to Cirq qubit ordering (same as ours, big-endian)."""
-        # Cirq uses big-endian by default, same as our convention
-        return state.copy()
-    
+        """Convert state to Cirq's little-endian ordering."""
+        if n_qubits <= 1:
+            return state.copy()
+        reshaped = state.reshape([2] * n_qubits)
+        return reshaped.transpose(list(reversed(range(n_qubits)))).reshape(-1)
+
     def _pauli_gate(self, s: int):
         """Return Cirq Pauli gate for index s."""
         self._ensure_cirq()
         cirq = self._cirq
         if s == 1:
             return cirq.X
-        elif s == 2:
+        if s == 2:
             return cirq.Y
-        elif s == 3:
+        if s == 3:
             return cirq.Z
         return None
-    
+
+    def _matrix_gate(self, matrix: np.ndarray):
+        self._ensure_cirq()
+        cirq = self._cirq
+        if hasattr(cirq, "MatrixGate"):
+            return cirq.MatrixGate(matrix)
+        if hasattr(cirq, "SingleQubitMatrixGate"):
+            return cirq.SingleQubitMatrixGate(matrix)
+        raise RuntimeError("Cirq matrix gate unavailable; upgrade Cirq.")
+
     def _build_circuit(
         self,
         circuit: Circuit,
@@ -285,22 +295,21 @@ class QsimCirq(Backend):
         """Build Cirq circuit with noise and Pauli insertions."""
         self._ensure_cirq()
         cirq = self._cirq
-        
+
         moments = []
-        
+
         for l, layer in enumerate(circuit.layers):
             layer_ops = []
-            
+
             for gate in layer:
                 if isinstance(gate.content, np.ndarray):
-                    # 1Q Haar-random gate
                     q = qubits[gate.qubits[0]]
-                    layer_ops.append(cirq.MatrixGate(gate.content).on(q))
+                    layer_ops.append(self._matrix_gate(gate.content).on(q))
                     continue
-                
+
                 name = gate.content
                 q0, q1 = qubits[gate.qubits[0]], qubits[gate.qubits[1]]
-                
+
                 if name == "CNOT":
                     layer_ops.append(cirq.CNOT(q0, q1))
                 elif name == "CNOT_R":
@@ -311,63 +320,60 @@ class QsimCirq(Backend):
                     layer_ops.append(cirq.SWAP(q0, q1))
                 else:
                     raise ValueError(f"Unsupported 2q gate: {name}")
-            
+
             if layer_ops:
                 moments.append(cirq.Moment(layer_ops))
-            
-            # Add noise + insertions after 2Q gates
+
             noise_ops = []
             for gate in layer:
                 if isinstance(gate.content, np.ndarray):
                     continue
-                
+
                 name = gate.content
                 if name not in noise_channels:
                     continue
-                
+
                 q0, q1 = qubits[gate.qubits[0]], qubits[gate.qubits[1]]
                 chan0, chan1 = noise_channels[name]
-                
+
                 noise_ops.append(chan0.on(q0))
                 noise_ops.append(chan1.on(q1))
-                
-                # Pauli insertions
+
                 for q_idx, q in [(gate.qubits[0], q0), (gate.qubits[1], q1)]:
                     s = insertions.get((l, q_idx), 0)
                     pauli = self._pauli_gate(s)
                     if pauli is not None:
                         noise_ops.append(pauli.on(q))
-            
+
             if noise_ops:
-                # Add noise ops one at a time to avoid moment conflicts
                 for op in noise_ops:
                     moments.append(cirq.Moment([op]))
-        
+
         return cirq.Circuit(moments)
-    
+
+    def _pauli_operator(self, observable: str) -> np.ndarray:
+        pauli_mats = {
+            "I": np.eye(2, dtype=complex),
+            "X": np.array([[0, 1], [1, 0]], dtype=complex),
+            "Y": np.array([[0, -1j], [1j, 0]], dtype=complex),
+            "Z": np.array([[1, 0], [0, -1]], dtype=complex),
+        }
+        op = np.array([[1]], dtype=complex)
+        for char in observable[::-1]:
+            op = np.kron(op, pauli_mats[char])
+        return op
+
     def _compute_expectation(
         self,
         final_state: np.ndarray,
-        observable: str,
-        n_qubits: int,
+        pauli_op: np.ndarray,
     ) -> float:
-        """Compute expectation value of Pauli observable."""
-        # Build Pauli operator matrix
-        pauli_mats = {
-            'I': np.eye(2, dtype=complex),
-            'X': np.array([[0, 1], [1, 0]], dtype=complex),
-            'Y': np.array([[0, -1j], [1j, 0]], dtype=complex),
-            'Z': np.array([[1, 0], [0, -1]], dtype=complex),
-        }
-        
-        # Tensor product (observable is in qubit order: q0 q1 q2 ...)
-        op = np.array([[1]], dtype=complex)
-        for char in observable:
-            op = np.kron(op, pauli_mats[char])
-        
-        # Expectation value: <psi|O|psi>
-        return float(np.real(np.conj(final_state) @ op @ final_state))
-    
+        """Compute expectation value for a precomputed Pauli operator."""
+        state = np.asarray(final_state)
+        if state.ndim == 1:
+            return float(np.real(np.conj(state) @ pauli_op @ state))
+        return float(np.real(np.trace(state @ pauli_op)))
+
     def expectation(
         self,
         circuit: Circuit,
@@ -380,7 +386,7 @@ class QsimCirq(Backend):
         return self.batch_expectations(
             circuit, observable, initial_state, noise, [insertions or {}]
         )[0]
-    
+
     def batch_expectations(
         self,
         circuit: Circuit,
@@ -392,30 +398,35 @@ class QsimCirq(Backend):
         """Batched circuit expectation values."""
         if insertions_list is None:
             insertions_list = [{}]
-        
+
         self._ensure_cirq()
         cirq = self._cirq
-        
+
         n = circuit.n_qubits
         qubits = cirq.LineQubit.range(n)
-        
+
         init_state = self._to_cirq_state(initial_state, n)
         noise_channels = self._get_kraus_ops(noise)
-        
+        pauli_op = self._pauli_operator(observable)
+
         values = []
         for insertions in insertions_list:
             cirq_circuit = self._build_circuit(circuit, qubits, noise_channels, insertions)
-            
-            # Simulate with initial state
+
             result = self._simulator.simulate(
                 cirq_circuit,
                 initial_state=init_state,
+                qubit_order=qubits,
             )
-            
-            final_state = result.final_state_vector
-            exp_val = self._compute_expectation(final_state, observable, n)
-            values.append(exp_val)
-        
+
+            final_state = getattr(result, "final_density_matrix", None)
+            if final_state is None:
+                final_state = getattr(result, "final_state_vector", None)
+            if callable(final_state):
+                final_state = final_state()
+
+            values.append(self._compute_expectation(final_state, pauli_op))
+
         return values
 
 
@@ -430,7 +441,7 @@ def create_backend(
     """Factory function to create backend instances."""
     if name == "qiskit_statevector":
         return QiskitStatevector(batch_size=batch_size)
-    elif name == "qsim" or name == "qsim_cirq":
-        return QsimCirq(n_threads=n_threads)
+    if name == "cirq":
+        return CirqSimulator(n_threads=n_threads)
     else:
         raise ValueError(f"Unknown backend: {name}")

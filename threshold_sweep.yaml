@@ -7,6 +7,7 @@ seed: 42
 progress: true
 skip_compare: false
 timings: true           # Track timing per config
+qiskit_batch_size: auto
 
 n_qubits: 8
 depth: 500
@@ -23,8 +24,6 @@ circuit_config:
     infidelity: 0.01
     isotropic: true
     seed: 952
-# Fixed batch size - skip expensive autotuning
-qiskit_batch_size: 16
 
 autotune_candidates: [16]
 autotune_samples: 50

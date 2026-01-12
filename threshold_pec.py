@@ -122,8 +122,12 @@ def generate_trials(
     trial_iter = tqdm(range(n_trials), desc="Generating trials", disable=not progress)
     for t in trial_iter:
         rng = np.random.default_rng(seed + t)
+        noise_seed = None
+        if noise_model_config is not None and "seed" in noise_model_config:
+            noise_seed = int(noise_model_config["seed"]) + t
+        noise_rng = np.random.default_rng(noise_seed) if noise_seed is not None else rng
         circuit = random_circuit(n_qubits, depth, rng, twoq_gates)
-        noise = generate_noise_model(rng, noise_model_config, twoq_gates)
+        noise = generate_noise_model(noise_rng, noise_model_config, twoq_gates)
         init = random_product_state(n_qubits, rng)
         obs = random_observable(n_qubits, rng)
         locs = error_locations(circuit, noise)
