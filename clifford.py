@@ -70,7 +70,7 @@ CLIFFORD_1Q_KEY_TO_INDEX = {_matrix_key(mat): idx for idx, mat in enumerate(CLIF
 @dataclass
 class CliffordGate(Gate):
     """Gate with attached 1Q Clifford decomposition for Stim."""
-    clifford_seq: List[str] = None
+    clifford_seq: Optional[List[str]] = None
 
 
 def _stim_gate_ops(gate: Gate) -> Iterable[Tuple[str, List[int]]]:

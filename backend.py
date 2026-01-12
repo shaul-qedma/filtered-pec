@@ -6,7 +6,7 @@ Simulation backend abstraction for PEC.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Tuple, Optional, Any, TYPE_CHECKING, cast
+from typing import Dict, List, Tuple, Optional, Any, TYPE_CHECKING, cast, Callable
 
 import numpy as np
 
@@ -323,7 +323,7 @@ class CirqSimulator(Backend):
 
             final_state = getattr(result, "final_state_vector", None)
             if callable(final_state):
-                final_state = final_state()
+                final_state = cast(Callable[[], Any], final_state)()
             if final_state is None:
                 raise RuntimeError("Cirq simulator did not return a final state.")
             final_state = np.asarray(final_state)
