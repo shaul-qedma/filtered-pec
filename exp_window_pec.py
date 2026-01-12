@@ -16,7 +16,7 @@ The quasi-probability:
 
 import numpy as np
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from pec_shared import (
     ETA, NoisySimulator, Circuit
@@ -25,10 +25,10 @@ from pec_shared import (
 from rich import box
 from rich.console import Console
 from rich.table import Table
-from tqdm import tqdm
 
 DIRECT_STATEVECTOR_QUBITS_MAX = 1
 QISKIT_METHOD = "statevector"
+DEFAULT_QISKIT_BATCH_SIZE = 10
 console = Console()
 VERIFY_TEST_CASES = (
     ("Depolarizing 5%", np.array([0.95, 0.05 / 3, 0.05 / 3, 0.05 / 3])),
@@ -103,8 +103,6 @@ def pec_estimate(
     beta: float,
     n_samples: int,
     seed: int = 0,
-    progress: bool = False,
-    progress_desc: Optional[str] = None,
 ) -> PECEstimate:
     """
     PEC estimation with exponential window filter.
@@ -138,17 +136,7 @@ def pec_estimate(
     # Monte Carlo sampling
     estimates = np.empty(n_samples)
     
-    sample_iter = range(n_samples)
-    if progress:
-        sample_iter = tqdm(
-            sample_iter,
-            desc=progress_desc or "samples",
-            leave=False,
-            ascii=True,
-            mininterval=1.0,
-        )
-
-    for i in sample_iter:
+    for i in range(n_samples):
         # Sample Pauli insertions independently at each location
         insertions = {}
         sign = 1.0
@@ -255,6 +243,39 @@ def _build_qiskit_circuit(
     return qc
 
 
+def _qiskit_batch_expectations(
+    circuit: Circuit,
+    init_statevector,
+    noise_instr: dict,
+    insertions_list: List[dict],
+    pauli_obs,
+    QuantumCircuit,
+    UnitaryGate,
+    Statevector,
+    backend,
+) -> List[float]:
+    circuits = []
+    for insertions in insertions_list:
+        qc = _build_qiskit_circuit(
+            circuit=circuit,
+            init_statevector=init_statevector,
+            noise_instr=noise_instr,
+            insertions=insertions,
+            QuantumCircuit=QuantumCircuit,
+            UnitaryGate=UnitaryGate,
+        )
+        qc.save_statevector()
+        circuits.append(qc)
+
+    result = backend.run(circuits, shots=1).result()
+    values: List[float] = []
+    for idx in range(len(circuits)):
+        state = result.data(idx)["statevector"]
+        sv = state if isinstance(state, Statevector) else Statevector(state)
+        values.append(float(np.real(sv.expectation_value(pauli_obs))))
+    return values
+
+
 def pec_estimate_qiskit(
     circuit: Circuit,
     observable: str,
@@ -264,8 +285,7 @@ def pec_estimate_qiskit(
     beta: float,
     n_samples: int,
     seed: int = 0,
-    progress: bool = False,
-    progress_desc: Optional[str] = None,
+    batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
 ) -> PECEstimate:
     """
     PEC estimation with exponential window filter using Qiskit simulation.
@@ -285,38 +305,35 @@ def pec_estimate_qiskit(
     backend = AerSimulator(method=QISKIT_METHOD)
 
     estimates = np.empty(n_samples)
-    sample_iter = range(n_samples)
-    if progress:
-        sample_iter = tqdm(
-            sample_iter,
-            desc=progress_desc or "samples",
-            leave=False,
-            ascii=True,
-            mininterval=1.0,
-        )
+    batch_size = n_samples if batch_size <= 0 else batch_size
 
-    for i in sample_iter:
-        insertions = {}
-        sign = 1.0
-        for v, (layer, qubit, _) in enumerate(error_locs):
-            s = rng.choice(4, p=sampling_probs[v])
-            insertions[(layer, qubit)] = s
-            sign *= sampling_signs[v][s]
+    for start in range(0, n_samples, batch_size):
+        end = min(n_samples, start + batch_size)
+        insertions_list = []
+        signs = np.empty(end - start)
+        for i in range(start, end):
+            insertions = {}
+            sign = 1.0
+            for v, (layer, qubit, _) in enumerate(error_locs):
+                s = rng.choice(4, p=sampling_probs[v])
+                insertions[(layer, qubit)] = s
+                sign *= sampling_signs[v][s]
+            insertions_list.append(insertions)
+            signs[i - start] = sign
 
-        qc = _build_qiskit_circuit(
+        measurements = _qiskit_batch_expectations(
             circuit=circuit,
             init_statevector=init_state,
             noise_instr=noise_instr,
-            insertions=insertions,
+            insertions_list=insertions_list,
+            pauli_obs=pauli_obs,
             QuantumCircuit=QuantumCircuit,
             UnitaryGate=UnitaryGate,
+            Statevector=Statevector,
+            backend=backend,
         )
-        qc.save_statevector()
-
-        result = backend.run(qc, shots=1).result()
-        state = result.data(0)["statevector"]
-        sv = state if isinstance(state, Statevector) else Statevector(state)
-        estimates[i] = sign * np.real(sv.expectation_value(pauli_obs))
+        for j, measurement in enumerate(measurements):
+            estimates[start + j] = signs[j] * measurement
 
     mean = total_qp_norm * estimates.mean()
     std = total_qp_norm * estimates.std() / np.sqrt(n_samples)

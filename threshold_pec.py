@@ -26,17 +26,18 @@ import numpy as np
 from rich import box
 from rich.console import Console
 from rich.table import Table
-from tqdm import tqdm
 
 from exp_window_pec import (
     exp_window_quasi_prob,
     qp_norm,
     pec_estimate,
     pec_estimate_qiskit,
+    _qiskit_batch_expectations,
     _build_qiskit_circuit,
     _qiskit_noise_instructions,
     _require_qiskit,
     _to_qiskit_statevector,
+    DEFAULT_QISKIT_BATCH_SIZE,
 )
 from pec_shared import (
     STANDARD_GATES,
@@ -108,6 +109,47 @@ class ThresholdPECEstimate:
     weight_above_frac: float
 
 
+@dataclass
+class TrialData:
+    circuit: Circuit
+    noise: dict
+    initial_state: np.ndarray
+    observable: str
+    error_locs: List[Tuple]
+    ideal: float
+    sim: NoisySimulator
+
+
+def generate_trials(
+    n_qubits: int,
+    depth: int,
+    n_trials: int,
+    seed: int,
+) -> List[TrialData]:
+    trials: List[TrialData] = []
+    for t in range(n_trials):
+        rng = np.random.default_rng(seed + t)
+        circuit = random_circuit(n_qubits, depth, rng)
+        noise = random_noise_model(rng)
+        init = random_product_state(n_qubits, rng)
+        obs = random_observable(n_qubits, rng)
+        locs = error_locations(circuit, noise)
+        sim = NoisySimulator(STANDARD_GATES, noise)
+        ideal = sim.ideal(circuit, obs, init)
+        trials.append(
+            TrialData(
+                circuit=circuit,
+                noise=noise,
+                initial_state=init,
+                observable=obs,
+                error_locs=locs,
+                ideal=ideal,
+                sim=sim,
+            )
+        )
+    return trials
+
+
 def _resolve_filter(
     filter_type: str,
     w0: int,
@@ -138,8 +180,8 @@ def _importance_sampling_estimate(
     n_samples: int,
     rng: np.random.Generator,
     w0_value: Optional[int],
-    progress: bool = False,
-    progress_desc: Optional[str] = None,
+    measure_batch_func: Optional[Callable[[List[Dict[Tuple[int, int], int]]], List[float]]] = None,
+    batch_size: int = 0,
 ) -> ThresholdPECEstimate:
     if n_samples < MIN_SAMPLES:
         raise ValueError("n_samples must be positive")
@@ -169,37 +211,58 @@ def _importance_sampling_estimate(
     importance_weights = np.empty(n_samples, dtype=float)
     sample_weights = np.empty(n_samples, dtype=float)
 
-    sample_iter = range(n_samples)
-    if progress:
-        sample_iter = tqdm(
-            sample_iter,
-            desc=progress_desc or "samples",
-            leave=False,
-            ascii=True,
-            mininterval=1.0,
-        )
+    if measure_batch_func is None:
+        for i in range(n_samples):
+            insertions: Dict[Tuple[int, int], int] = {}
+            sign = 1.0
+            weight = 0
+            for v, (layer, qubit, _) in enumerate(error_locs):
+                s = int(rng.choice(4, p=sampling_probs[v]))
+                sign *= sampling_signs[v][s]
+                if s != 0:
+                    insertions[(layer, qubit)] = s
+                    weight += 1
 
-    for i in sample_iter:
-        insertions: Dict[Tuple[int, int], int] = {}
-        sign = 1.0
-        weight = 0
-        for v, (layer, qubit, _) in enumerate(error_locs):
-            s = int(rng.choice(4, p=sampling_probs[v]))
-            sign *= sampling_signs[v][s]
-            if s != 0:
-                insertions[(layer, qubit)] = s
-                weight += 1
+            measurement = float(measure_func(insertions))
+            exp_val = sign * measurement
 
-        measurement = float(measure_func(insertions))
-        exp_val = sign * measurement
+            h_prop = float(np.exp(-beta_prop * weight))
+            h_targ = h_target(weight)
+            iw = h_targ / h_prop if h_prop > EPS_H_PROP else 0.0
 
-        h_prop = float(np.exp(-beta_prop * weight))
-        h_targ = h_target(weight)
-        iw = h_targ / h_prop if h_prop > EPS_H_PROP else 0.0
+            target_estimates[i] = iw * exp_val
+            importance_weights[i] = iw
+            sample_weights[i] = weight
+    else:
+        batch_size = n_samples if batch_size <= 0 else batch_size
+        for start in range(0, n_samples, batch_size):
+            end = min(n_samples, start + batch_size)
+            insertions_list: List[Dict[Tuple[int, int], int]] = []
+            signs = np.empty(end - start, dtype=float)
+            weights = np.empty(end - start, dtype=float)
+            for i in range(start, end):
+                insertions: Dict[Tuple[int, int], int] = {}
+                sign = 1.0
+                weight = 0
+                for v, (layer, qubit, _) in enumerate(error_locs):
+                    s = int(rng.choice(4, p=sampling_probs[v]))
+                    sign *= sampling_signs[v][s]
+                    if s != 0:
+                        insertions[(layer, qubit)] = s
+                        weight += 1
+                insertions_list.append(insertions)
+                signs[i - start] = sign
+                weights[i - start] = weight
 
-        target_estimates[i] = iw * exp_val
-        importance_weights[i] = iw
-        sample_weights[i] = weight
+            measurements = measure_batch_func(insertions_list)
+            for j, measurement in enumerate(measurements):
+                exp_val = signs[j] * float(measurement)
+                h_prop = float(np.exp(-beta_prop * weights[j]))
+                h_targ = h_target(int(weights[j]))
+                iw = h_targ / h_prop if h_prop > EPS_H_PROP else 0.0
+                target_estimates[start + j] = iw * exp_val
+                importance_weights[start + j] = iw
+                sample_weights[start + j] = weights[j]
     target_mean = total_qp_norm * float(target_estimates.mean())
     target_std = total_qp_norm * _standard_error(target_estimates)
 
@@ -235,8 +298,7 @@ def threshold_pec_estimate(
     softplus_tau: float = SOFTPLUS_TAU_DEFAULT,
     h_target: Optional[Callable[[int], float]] = None,
     w0_density: float = 0.30,
-    progress: bool = False,
-    progress_desc: Optional[str] = None,
+    batch_size: int = 0,
 ) -> ThresholdPECEstimate:
     rng = np.random.default_rng(seed)
     w0_value = _resolve_w0(w0_density, len(error_locs))
@@ -253,8 +315,7 @@ def threshold_pec_estimate(
         n_samples,
         rng,
         w0_value,
-        progress=progress,
-        progress_desc=progress_desc,
+        batch_size=batch_size,
     )
 
 
@@ -272,8 +333,7 @@ def threshold_pec_qiskit(
     softplus_tau: float = SOFTPLUS_TAU_DEFAULT,
     h_target: Optional[Callable[[int], float]] = None,
     w0_density: float = 0.30,
-    progress: bool = False,
-    progress_desc: Optional[str] = None,
+    batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
 ) -> ThresholdPECEstimate:
     rng = np.random.default_rng(seed)
     w0_value = _resolve_w0(w0_density, len(error_locs))
@@ -300,6 +360,19 @@ def threshold_pec_qiskit(
         sv = state if isinstance(state, Statevector) else Statevector(state)
         return float(np.real(sv.expectation_value(pauli_obs)))
 
+    def measure_batch(insertions_list: List[Dict[Tuple[int, int], int]]) -> List[float]:
+        return _qiskit_batch_expectations(
+            circuit=circuit,
+            init_statevector=init_sv,
+            noise_instr=noise_instr,
+            insertions_list=insertions_list,
+            pauli_obs=pauli_obs,
+            QuantumCircuit=QuantumCircuit,
+            UnitaryGate=UnitaryGate,
+            Statevector=Statevector,
+            backend=backend,
+        )
+
     return _importance_sampling_estimate(
         measure,
         error_locs,
@@ -308,8 +381,8 @@ def threshold_pec_qiskit(
         n_samples,
         rng,
         w0_value,
-        progress=progress,
-        progress_desc=progress_desc,
+        measure_batch_func=measure_batch,
+        batch_size=batch_size,
     )
 
 
@@ -325,137 +398,140 @@ def benchmark(
     softplus_tau: float = SOFTPLUS_TAU_DEFAULT,
     use_qiskit: bool = False,
     w0_density: float = 0.30,
+    trials: Optional[List[TrialData]] = None,
+    compute_full: bool = True,
+    compute_exp: bool = True,
+    compute_filtered: bool = True,
+    qiskit_batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
     progress: bool = False,
 ) -> Dict:
-    results = {
-        "full_pec": [],
-        "exp_window": [],
-        "filtered": [],
-    }
-    ideals = []
+    if trials is None:
+        trials = generate_trials(n_qubits, depth, n_trials, seed)
+    if not trials:
+        raise ValueError("No trials available for benchmark.")
 
-    trial_iter = range(n_trials)
-    if progress:
-        trial_iter = tqdm(
-            trial_iter,
-            desc="trials",
-            leave=False,
-            ascii=True,
-            mininterval=1.0,
-        )
+    results: Dict[str, List[Dict]] = {"full_pec": [], "exp_window": [], "filtered": []}
+    ideals = [trial.ideal for trial in trials]
 
-    for t in trial_iter:
-        rng = np.random.default_rng(seed + t)
-        circuit = random_circuit(n_qubits, depth, rng)
-        noise = random_noise_model(rng)
-        init = random_product_state(n_qubits, rng)
-        obs = random_observable(n_qubits, rng)
-        locs = error_locations(circuit, noise)
-
-        sim = NoisySimulator(STANDARD_GATES, noise)
-        ideal = sim.ideal(circuit, obs, init)
-        ideals.append(ideal)
+    w0_values = []
+    for t, trial in enumerate(trials):
+        if progress:
+            console.print(f"  Trial {t + 1}/{len(trials)}")
+        circuit = trial.circuit
+        noise = trial.noise
+        init = trial.initial_state
+        obs = trial.observable
+        locs = trial.error_locs
+        ideal = trial.ideal
+        w0_values.append(_resolve_w0(w0_density, len(locs)))
 
         if use_qiskit:
-            est_full = pec_estimate_qiskit(
-                circuit,
-                obs,
-                init,
-                noise,
-                locs,
-                beta=0.0,
-                n_samples=n_samples,
-                seed=seed + SEED_OFFSET_FULL * t,
-                progress=progress,
-                progress_desc="full_pec samples",
-            )
-            est_exp = pec_estimate_qiskit(
-                circuit,
-                obs,
-                init,
-                noise,
-                locs,
-                beta=beta_prop,
-                n_samples=n_samples,
-                seed=seed + SEED_OFFSET_EXP * t,
-                progress=progress,
-                progress_desc="exp_window samples",
-            )
-            est_filtered = threshold_pec_qiskit(
-                circuit,
-                obs,
-                init,
-                noise,
-                locs,
-                beta_prop=beta_prop,
-                beta_thresh=beta_thresh,
-                n_samples=n_samples,
-                seed=seed + SEED_OFFSET_FILTERED * t,
-                filter_type=filter_type,
-                softplus_tau=softplus_tau,
-                w0_density=w0_density,
-                progress=progress,
-                progress_desc="filtered samples",
-            )
+            est_full = None
+            est_exp = None
+            est_filtered = None
+            if compute_full:
+                est_full = pec_estimate_qiskit(
+                    circuit,
+                    obs,
+                    init,
+                    noise,
+                    locs,
+                    beta=0.0,
+                    n_samples=n_samples,
+                    seed=seed + SEED_OFFSET_FULL * t,
+                    batch_size=qiskit_batch_size,
+                )
+            if compute_exp:
+                est_exp = pec_estimate_qiskit(
+                    circuit,
+                    obs,
+                    init,
+                    noise,
+                    locs,
+                    beta=beta_prop,
+                    n_samples=n_samples,
+                    seed=seed + SEED_OFFSET_EXP * t,
+                    batch_size=qiskit_batch_size,
+                )
+            if compute_filtered:
+                est_filtered = threshold_pec_qiskit(
+                    circuit,
+                    obs,
+                    init,
+                    noise,
+                    locs,
+                    beta_prop=beta_prop,
+                    beta_thresh=beta_thresh,
+                    n_samples=n_samples,
+                    seed=seed + SEED_OFFSET_FILTERED * t,
+                    filter_type=filter_type,
+                    softplus_tau=softplus_tau,
+                    w0_density=w0_density,
+                    batch_size=qiskit_batch_size,
+                )
         else:
-            est_full = pec_estimate(
-                sim,
-                circuit,
-                obs,
-                init,
-                locs,
-                beta=0.0,
-                n_samples=n_samples,
-                seed=seed + SEED_OFFSET_FULL * t,
-                progress=progress,
-                progress_desc="full_pec samples",
-            )
-            est_exp = pec_estimate(
-                sim,
-                circuit,
-                obs,
-                init,
-                locs,
-                beta=beta_prop,
-                n_samples=n_samples,
-                seed=seed + SEED_OFFSET_EXP * t,
-                progress=progress,
-                progress_desc="exp_window samples",
-            )
-            est_filtered = threshold_pec_estimate(
-                sim,
-                circuit,
-                obs,
-                init,
-                locs,
-                beta_prop=beta_prop,
-                beta_thresh=beta_thresh,
-                n_samples=n_samples,
-                seed=seed + SEED_OFFSET_FILTERED * t,
-                filter_type=filter_type,
-                softplus_tau=softplus_tau,
-                w0_density=w0_density,
-                progress=progress,
-                progress_desc="filtered samples",
-            )
+            sim = trial.sim
+            est_full = None
+            est_exp = None
+            est_filtered = None
+            if compute_full:
+                est_full = pec_estimate(
+                    sim,
+                    circuit,
+                    obs,
+                    init,
+                    locs,
+                    beta=0.0,
+                    n_samples=n_samples,
+                    seed=seed + SEED_OFFSET_FULL * t,
+                )
+            if compute_exp:
+                est_exp = pec_estimate(
+                    sim,
+                    circuit,
+                    obs,
+                    init,
+                    locs,
+                    beta=beta_prop,
+                    n_samples=n_samples,
+                    seed=seed + SEED_OFFSET_EXP * t,
+                )
+            if compute_filtered:
+                est_filtered = threshold_pec_estimate(
+                    sim,
+                    circuit,
+                    obs,
+                    init,
+                    locs,
+                    beta_prop=beta_prop,
+                    beta_thresh=beta_thresh,
+                    n_samples=n_samples,
+                    seed=seed + SEED_OFFSET_FILTERED * t,
+                    filter_type=filter_type,
+                    softplus_tau=softplus_tau,
+                    w0_density=w0_density,
+                )
 
-        results["full_pec"].append(
-            {"estimate": est_full.mean, "qp_norm": est_full.qp_norm, "error": est_full.mean - ideal}
-        )
-        results["exp_window"].append(
-            {"estimate": est_exp.mean, "qp_norm": est_exp.qp_norm, "error": est_exp.mean - ideal}
-        )
-        results["filtered"].append(
-            {
-                "estimate": est_filtered.mean,
-                "qp_norm": est_filtered.qp_norm_proposal,
-                "ess": est_filtered.effective_samples,
-                "above": est_filtered.weight_above_frac,
-                "weight_mean": est_filtered.weight_mean,
-                "weight_std": est_filtered.weight_std,
-                "error": est_filtered.mean - ideal,
-            }
-        )
+        if compute_full and est_full is not None:
+            results["full_pec"].append(
+                {"estimate": est_full.mean, "qp_norm": est_full.qp_norm, "error": est_full.mean - ideal}
+            )
+        if compute_exp and est_exp is not None:
+            results["exp_window"].append(
+                {"estimate": est_exp.mean, "qp_norm": est_exp.qp_norm, "error": est_exp.mean - ideal}
+            )
+        if compute_filtered and est_filtered is not None:
+            results["filtered"].append(
+                {
+                    "estimate": est_filtered.mean,
+                    "qp_norm": est_filtered.qp_norm_proposal,
+                    "ess": est_filtered.effective_samples,
+                    "above": est_filtered.weight_above_frac,
+                    "weight_mean": est_filtered.weight_mean,
+                    "weight_std": est_filtered.weight_std,
+                    "error": est_filtered.mean - ideal,
+                }
+            )
 
     return {
         "results": results,
@@ -464,10 +540,13 @@ def benchmark(
             "n_qubits": n_qubits,
             "depth": depth,
             "w0_density": w0_density,
+            "w0_mean": float(np.mean(w0_values)) if w0_values else 0.0,
+            "w0_min": int(min(w0_values)) if w0_values else 0,
+            "w0_max": int(max(w0_values)) if w0_values else 0,
             "beta_prop": beta_prop,
             "beta_thresh": beta_thresh,
             "n_samples": n_samples,
-            "n_trials": n_trials,
+            "n_trials": len(trials),
             "filter_type": filter_type,
             "softplus_tau": softplus_tau,
             "use_qiskit": use_qiskit,
@@ -482,7 +561,10 @@ def print_benchmark_results(data: Dict) -> None:
     if config["filter_type"] == "softplus":
         label = f"softplus τ={config['softplus_tau']}"
 
-    w0_label = f"ρ={config['w0_density']}"
+    w0_label = (
+        f"w0≈{config['w0_mean']:.1f} "
+        f"(ρ={config['w0_density']}, range {config['w0_min']}-{config['w0_max']})"
+    )
 
     console.rule("Threshold PEC Results")
     console.print(

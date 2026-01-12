@@ -16,19 +16,20 @@ from rich import box
 from rich.console import Console
 from rich.table import Table
 
-from threshold_pec import benchmark
+from exp_window_pec import DEFAULT_QISKIT_BATCH_SIZE
+from threshold_pec import benchmark, generate_trials, TrialData
 
 console = Console()
 DEFAULT_N_QUBITS = 4
 DEFAULT_DEPTH = 4
-DEFAULT_QUBITS_RANGE = "4-6"
+DEFAULT_QUBITS_RANGE = "4-8"
 DEFAULT_DEPTHS_RANGE = "6-14:2"
 DEFAULT_MIN_VOLUME = 24
 DEFAULT_MAX_VOLUME = 64
 DEFAULT_RATIOS = "0.75,1.0,1.5,2.0"
 DEFAULT_CONFIGS_PER_RATIO = 2
 DEFAULT_MAX_CONFIGS = 0
-DEFAULT_N_SAMPLES = 150
+DEFAULT_N_SAMPLES = 500
 DEFAULT_N_TRIALS = 12
 DEFAULT_SEED = 42
 DEFAULT_W0_DENSITIES = "0.30,0.40,0.50,0.60"
@@ -187,14 +188,18 @@ def parameter_sweep(
     filter_type: str,
     softplus_taus: List[float],
     use_qiskit: bool,
+    trials: List[TrialData],
+    qiskit_batch_size: int,
     progress: bool,
 ) -> List[dict]:
     console.rule("THRESHOLD PEC PARAMETER SWEEP")
 
     volume = estimate_error_locs(n_qubits, depth)
     console.print(f"Circuit: {n_qubits} qubits, depth {depth}, volume={volume}")
-    console.print(f"Samples: {n_samples}, Trials: {n_trials}, Qiskit={use_qiskit}")
+    console.print(f"Samples: {n_samples}, Trials: {len(trials)}, Qiskit={use_qiskit}")
 
+    if progress:
+        console.print("  Full PEC trials")
     data_full = benchmark(
         n_qubits=n_qubits,
         depth=depth,
@@ -207,6 +212,11 @@ def parameter_sweep(
         softplus_tau=DEFAULT_SOFTPLUS_TAU,
         use_qiskit=use_qiskit,
         w0_density=w0_densities[0],
+        trials=trials,
+        compute_full=True,
+        compute_exp=False,
+        compute_filtered=False,
+        qiskit_batch_size=qiskit_batch_size,
         progress=progress,
     )
     full_errors = np.array([d["error"] for d in data_full["results"]["full_pec"]])
@@ -221,6 +231,7 @@ def parameter_sweep(
     table = Table(box=box.ASCII)
     table.add_column("Method")
     table.add_column("ρ", justify="right")
+    table.add_column("w0", justify="right")
     table.add_column("β_prop", justify="right")
     table.add_column("β_thresh", justify="right")
     if filter_type == "softplus":
@@ -232,7 +243,7 @@ def parameter_sweep(
     table.add_column("vs Full", justify="right")
 
     full_row = ["Full", "-"]
-    full_row.extend(["-", "-"])
+    full_row.extend(["-", "-", "-"])
     if filter_type == "softplus":
         full_row.append("-")
     full_row.extend(
@@ -240,8 +251,6 @@ def parameter_sweep(
             f"{full_qp_norm:.2f}",
             f"{full_bias:.4f}",
             f"{full_rmse:.4f}",
-            "-",
-            "-",
             "-",
             "baseline",
         ]
@@ -253,6 +262,13 @@ def parameter_sweep(
             for beta_thresh in beta_thresh_values:
                 taus = softplus_taus if filter_type == "softplus" else [DEFAULT_SOFTPLUS_TAU]
                 for tau in taus:
+                    if progress:
+                        label = (
+                            f"  {filter_type} ρ={rho:.2f} β_prop={beta_prop:.2f} β_thresh={beta_thresh:.2f}"
+                        )
+                        if filter_type == "softplus":
+                            label = f"{label} τ={tau:.2f}"
+                        console.print(label)
                     data = benchmark(
                         n_qubits=n_qubits,
                         depth=depth,
@@ -265,6 +281,11 @@ def parameter_sweep(
                         softplus_tau=tau,
                         use_qiskit=use_qiskit,
                         w0_density=rho,
+                        trials=trials,
+                        compute_full=False,
+                        compute_exp=False,
+                        compute_filtered=True,
+                        qiskit_batch_size=qiskit_batch_size,
                         progress=progress,
                     )
 
@@ -281,10 +302,12 @@ def parameter_sweep(
                         "rmse": stats["rmse"],
                         "ess": stats["ess"],
                         "vs_full": vs_full,
+                        "w0_mean": data["config"]["w0_mean"],
                     }
                     results.append(row)
 
                     row = ["softplus" if filter_type == "softplus" else "threshold", f"{rho:.2f}"]
+                    row.append(f"{data['config']['w0_mean']:.1f}")
                     row.append(f"{beta_prop:.2f}")
                     row.append(f"{beta_thresh:.2f}")
                     if filter_type == "softplus":
@@ -305,13 +328,13 @@ def parameter_sweep(
     console.print("Best configuration:")
     if filter_type == "softplus":
         console.print(
-            f"  ρ={best['w0_density']}, β_prop={best['beta_prop']}, "
-            f"β_thresh={best['beta_thresh']}, τ={best['tau']}"
+            f"  ρ={best['w0_density']}, w0≈{best['w0_mean']:.1f}, "
+            f"β_prop={best['beta_prop']}, β_thresh={best['beta_thresh']}, τ={best['tau']}"
         )
     else:
         console.print(
-            f"  ρ={best['w0_density']}, β_prop={best['beta_prop']}, "
-            f"β_thresh={best['beta_thresh']}"
+            f"  ρ={best['w0_density']}, w0≈{best['w0_mean']:.1f}, "
+            f"β_prop={best['beta_prop']}, β_thresh={best['beta_thresh']}"
         )
     console.print(f"  RMSE = {best['rmse']:.4f} ({best['vs_full']:+.1f}% vs Full PEC)")
 
@@ -329,10 +352,14 @@ def compare_filters(
     beta_thresh: float,
     softplus_taus: List[float],
     use_qiskit: bool,
-    progress: bool,
+    trials: Optional[List[TrialData]] = None,
+    qiskit_batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
+    progress: bool = False,
 ) -> None:
     console.rule("THRESHOLD vs SOFTPLUS FILTER COMPARISON")
 
+    if progress:
+        console.print("  Threshold trials")
     data_thresh = benchmark(
         n_qubits=n_qubits,
         depth=depth,
@@ -345,11 +372,13 @@ def compare_filters(
         softplus_tau=DEFAULT_SOFTPLUS_TAU,
         use_qiskit=use_qiskit,
         w0_density=w0_density,
+        trials=trials,
+        qiskit_batch_size=qiskit_batch_size,
         progress=progress,
     )
     thresh_stats = _summary_from_filtered(data_thresh["results"]["filtered"])
 
-    w0_label = f"ρ={w0_density}"
+    w0_label = f"ρ={w0_density}, w0≈{data_thresh['config']['w0_mean']:.1f}"
 
     console.print(f"Config: {n_qubits}q, depth={depth}, {w0_label}, β_prop={beta_prop}, β_thresh={beta_thresh}")
     table = Table(box=box.ASCII)
@@ -363,6 +392,8 @@ def compare_filters(
     )
 
     for tau in softplus_taus:
+        if progress:
+            console.print(f"  Softplus τ={tau:.2f} trials")
         data_soft = benchmark(
             n_qubits=n_qubits,
             depth=depth,
@@ -375,6 +406,8 @@ def compare_filters(
             softplus_tau=tau,
             use_qiskit=use_qiskit,
             w0_density=w0_density,
+            trials=trials,
+            qiskit_batch_size=qiskit_batch_size,
             progress=progress,
         )
         soft_stats = _summary_from_filtered(data_soft["results"]["filtered"])
@@ -412,8 +445,6 @@ def _run(args: argparse.Namespace) -> None:
     beta_prop_values = _parse_list(args.beta_props, float)
     beta_thresh_values = _parse_list(args.beta_threshes, float)
     softplus_taus = _parse_list(args.softplus_taus, float)
-    progress = bool(args.progress or args.profile)
-
     benchmark_count = _benchmark_count(
         w0_densities=w0_densities,
         beta_prop_values=beta_prop_values,
@@ -426,9 +457,20 @@ def _run(args: argparse.Namespace) -> None:
     t0 = time.perf_counter()
     if not configs:
         raise ValueError("No configurations selected.")
+    first_trials: Optional[List[TrialData]] = None
+    first_config: Optional[Tuple[int, int]] = None
     for idx, (n_qubits, depth) in enumerate(configs):
         if idx:
             console.rule()
+        trials = generate_trials(
+            n_qubits=n_qubits,
+            depth=depth,
+            n_trials=args.n_trials,
+            seed=args.seed + idx * DEFAULT_CONFIG_SEED_OFFSET,
+        )
+        if idx == 0:
+            first_trials = trials
+            first_config = (n_qubits, depth)
         config_start = time.perf_counter()
         parameter_sweep(
             n_qubits=n_qubits,
@@ -442,7 +484,9 @@ def _run(args: argparse.Namespace) -> None:
             filter_type=args.filter_type,
             softplus_taus=softplus_taus,
             use_qiskit=not args.no_qiskit,
-            progress=progress,
+            trials=trials,
+            qiskit_batch_size=args.qiskit_batch_size,
+            progress=not args.no_progress,
         )
         elapsed = time.perf_counter() - config_start
         if args.timings or args.profile:
@@ -457,7 +501,9 @@ def _run(args: argparse.Namespace) -> None:
             )
 
     if not args.skip_compare:
-        compare_n, compare_d = configs[0]
+        if first_config is None or first_trials is None:
+            raise ValueError("No configurations selected for comparison.")
+        compare_n, compare_d = first_config
         compare_filters(
             n_qubits=compare_n,
             depth=compare_d,
@@ -469,7 +515,9 @@ def _run(args: argparse.Namespace) -> None:
             beta_thresh=beta_thresh_values[0],
             softplus_taus=softplus_taus,
             use_qiskit=not args.no_qiskit,
-            progress=progress,
+            trials=first_trials,
+            qiskit_batch_size=args.qiskit_batch_size,
+            progress=not args.no_progress,
         )
 
     if timing_rows:
@@ -554,10 +602,11 @@ def main() -> None:
     parser.add_argument("--filter-type", choices=["threshold", "softplus"], default="threshold")
     parser.add_argument("--softplus-taus", type=str, default=DEFAULT_SOFTPLUS_TAUS)
     parser.add_argument("--no-qiskit", action="store_true", help="Disable Qiskit simulation")
+    parser.add_argument("--no-progress", action="store_true", help="Disable trial progress logging")
     parser.add_argument("--skip-compare", action="store_true")
     parser.add_argument("--timings", action="store_true", help="Print per-config timing summary")
-    parser.add_argument("--progress", action="store_true", help="Show tqdm progress for trials/samples")
     parser.add_argument("--profile", action="store_true", help="Run cProfile and print a summary")
+    parser.add_argument("--qiskit-batch-size", type=int, default=DEFAULT_QISKIT_BATCH_SIZE)
     parser.add_argument("--profile-out", type=str, default=DEFAULT_PROFILE_OUT)
     parser.add_argument("--profile-top", type=int, default=DEFAULT_PROFILE_TOP)
     parser.add_argument(

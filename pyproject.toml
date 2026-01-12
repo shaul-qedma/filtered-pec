@@ -9,5 +9,4 @@ dependencies = [
     "qiskit>=2.2.3",
     "qiskit-aer>=0.17.2",
     "rich>=14.2.0",
-    "tqdm>=4.66.0",
 ]
