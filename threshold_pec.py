@@ -17,6 +17,7 @@ This keeps product sampling but applies a non-product target filter.
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -171,6 +172,7 @@ def _importance_sampling_estimate(
     rng: np.random.Generator,
     w0_value: Optional[int],
     diagnostics: Optional[Dict[str, bool]] = None,
+    progress: bool = False,
     measure_batch_func: Optional[Callable[[List[Dict[Tuple[int, int], int]]], List[float]]] = None,
     batch_size: int = 0,
 ) -> ThresholdPECEstimate:
@@ -206,8 +208,19 @@ def _importance_sampling_estimate(
     raw_measurements = np.empty(n_samples, dtype=float) if record_measurements else None
     batch_indices = np.zeros(n_samples, dtype=int) if diagnostics["baseline_tracking"] else None
 
+    show_progress = progress and sys.stderr.isatty()
     if measure_batch_func is None:
-        for i in range(n_samples):
+        sample_iter = range(n_samples)
+        if show_progress:
+            sample_iter = tqdm(
+                sample_iter,
+                desc="Samples",
+                unit="sample",
+                dynamic_ncols=True,
+                leave=False,
+                disable=not show_progress,
+            )
+        for i in sample_iter:
             insertions: Dict[Tuple[int, int], int] = {}
             sign = 1.0
             weight = 0
@@ -233,6 +246,16 @@ def _importance_sampling_estimate(
     else:
         batch_size = n_samples if batch_size <= 0 else batch_size
         batch_id = 0
+        total_bar = None
+        if show_progress:
+            total_bar = tqdm(
+                total=n_samples,
+                desc="Samples",
+                unit="sample",
+                dynamic_ncols=True,
+                leave=False,
+                disable=not show_progress,
+            )
         for start in range(0, n_samples, batch_size):
             end = min(n_samples, start + batch_size)
             insertions_list: List[Dict[Tuple[int, int], int]] = []
@@ -266,6 +289,10 @@ def _importance_sampling_estimate(
                 importance_weights[start + j] = iw
                 sample_weights[start + j] = weights[j]
             batch_id += 1
+            if total_bar is not None:
+                total_bar.update(end - start)
+        if total_bar is not None:
+            total_bar.close()
 
     target_mean = total_qp_norm * float(target_estimates.mean())
     target_std = total_qp_norm * (target_estimates.std(ddof=STD_DDOF) / np.sqrt(n_samples) if n_samples >= MIN_STD_SAMPLES else 0.0)
@@ -356,6 +383,7 @@ def threshold_pec_estimate(
     backend: Backend | None = None,
     batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
     diagnostics: Optional[Dict[str, bool]] = None,
+    progress: bool = False,
 ) -> ThresholdPECEstimate:
     """
     Threshold-filtered PEC estimation.
@@ -404,6 +432,7 @@ def threshold_pec_estimate(
         rng,
         w0_value,
         diagnostics=diagnostics,
+        progress=progress,
         measure_batch_func=measure_batch,
         batch_size=batch_size,
     )
@@ -487,6 +516,7 @@ def benchmark(
                 seed=seed + SEED_OFFSET_FULL + t,
                 backend=backend,
                 batch_size=batch_size,
+                progress=progress,
             )
 
         if compute_exp:
@@ -501,6 +531,7 @@ def benchmark(
                 seed=seed + SEED_OFFSET_EXP + t,
                 backend=backend,
                 batch_size=batch_size,
+                progress=progress,
             )
 
         if compute_filtered:
@@ -520,6 +551,7 @@ def benchmark(
                 backend=backend,
                 batch_size=batch_size,
                 diagnostics=diagnostics,
+                progress=progress,
             )
 
         if compute_full and est_full is not None:

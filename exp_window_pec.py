@@ -6,12 +6,14 @@ Exponential Window PEC Sampler
 from __future__ import annotations
 
 from typing import List, Tuple
+import sys
 
 import numpy as np
 
 from rich import box
 from rich.console import Console
 from rich.table import Table
+from tqdm import tqdm
 
 from backend import Backend, QiskitStatevector
 from constants import DEFAULT_QISKIT_BATCH_SIZE
@@ -57,6 +59,7 @@ def pec_estimate(
     seed: int = 0,
     backend: Backend | None = None,
     batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
+    progress: bool = False,
 ) -> PECEstimate:
     """
     PEC estimation with exponential window filter.
@@ -92,6 +95,18 @@ def pec_estimate(
     estimates = np.empty(n_samples)
     effective_batch = n_samples if batch_size <= 0 else batch_size
     
+    show_progress = progress and sys.stderr.isatty()
+    sample_bar = None
+    if show_progress:
+        sample_bar = tqdm(
+            total=n_samples,
+            desc="Samples",
+            unit="sample",
+            dynamic_ncols=True,
+            leave=False,
+            disable=not show_progress,
+        )
+
     for start in range(0, n_samples, effective_batch):
         end = min(n_samples, start + effective_batch)
         
@@ -114,6 +129,10 @@ def pec_estimate(
         
         for j, measurement in enumerate(measurements):
             estimates[start + j] = signs[j] * measurement
+        if sample_bar is not None:
+            sample_bar.update(end - start)
+    if sample_bar is not None:
+        sample_bar.close()
     
     mean = total_qp_norm * float(estimates.mean())
     std = total_qp_norm * float(estimates.std()) / np.sqrt(n_samples)
