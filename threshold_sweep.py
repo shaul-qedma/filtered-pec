@@ -221,7 +221,6 @@ def parameter_sweep(
     table = Table(box=box.ASCII)
     table.add_column("Method")
     table.add_column("ρ", justify="right")
-    table.add_column("w0", justify="right")
     table.add_column("β_prop", justify="right")
     table.add_column("β_thresh", justify="right")
     if filter_type == "softplus":
@@ -230,12 +229,10 @@ def parameter_sweep(
     table.add_column("Bias", justify="right")
     table.add_column("RMSE", justify="right")
     table.add_column("ESS", justify="right")
-    table.add_column("w_mean", justify="right")
-    table.add_column("p_gt_w0", justify="right")
     table.add_column("vs Full", justify="right")
 
     full_row = ["Full", "-"]
-    full_row.extend(["-", "-", "-"])
+    full_row.extend(["-", "-"])
     if filter_type == "softplus":
         full_row.append("-")
     full_row.extend(
@@ -284,14 +281,10 @@ def parameter_sweep(
                         "rmse": stats["rmse"],
                         "ess": stats["ess"],
                         "vs_full": vs_full,
-                        "w0_mean": data["config"]["w0_mean"],
-                        "w0_min": data["config"]["w0_min"],
-                        "w0_max": data["config"]["w0_max"],
                     }
                     results.append(row)
 
                     row = ["softplus" if filter_type == "softplus" else "threshold", f"{rho:.2f}"]
-                    row.append(f"{data['config']['w0_mean']:.1f}")
                     row.append(f"{beta_prop:.2f}")
                     row.append(f"{beta_thresh:.2f}")
                     if filter_type == "softplus":
@@ -302,8 +295,6 @@ def parameter_sweep(
                             f"{stats['bias']:.4f}",
                             f"{stats['rmse']:.4f}",
                             f"{stats['ess']:.1f}",
-                            f"{stats['weight_mean']:.2f}",
-                            f"{stats['above']:.2f}",
                             f"{vs_full:+.1f}%",
                         ]
                     )
@@ -314,13 +305,13 @@ def parameter_sweep(
     console.print("Best configuration:")
     if filter_type == "softplus":
         console.print(
-            f"  ρ={best['w0_density']}, w0≈{best['w0_mean']:.1f}, "
-            f"β_prop={best['beta_prop']}, β_thresh={best['beta_thresh']}, τ={best['tau']}"
+            f"  ρ={best['w0_density']}, β_prop={best['beta_prop']}, "
+            f"β_thresh={best['beta_thresh']}, τ={best['tau']}"
         )
     else:
         console.print(
-            f"  ρ={best['w0_density']}, w0≈{best['w0_mean']:.1f}, "
-            f"β_prop={best['beta_prop']}, β_thresh={best['beta_thresh']}"
+            f"  ρ={best['w0_density']}, β_prop={best['beta_prop']}, "
+            f"β_thresh={best['beta_thresh']}"
         )
     console.print(f"  RMSE = {best['rmse']:.4f} ({best['vs_full']:+.1f}% vs Full PEC)")
 
@@ -358,21 +349,17 @@ def compare_filters(
     )
     thresh_stats = _summary_from_filtered(data_thresh["results"]["filtered"])
 
-    w0_label = f"ρ={w0_density}, w0≈{data_thresh['config']['w0_mean']:.1f}"
+    w0_label = f"ρ={w0_density}"
 
     console.print(f"Config: {n_qubits}q, depth={depth}, {w0_label}, β_prop={beta_prop}, β_thresh={beta_thresh}")
     table = Table(box=box.ASCII)
     table.add_column("Filter")
     table.add_column("Bias", justify="right")
     table.add_column("RMSE", justify="right")
-    table.add_column("w_mean", justify="right")
-    table.add_column("p_gt_w0", justify="right")
     table.add_row(
         "Threshold",
         f"{thresh_stats['bias']:.4f}",
         f"{thresh_stats['rmse']:.4f}",
-        f"{thresh_stats['weight_mean']:.2f}",
-        f"{thresh_stats['above']:.2f}",
     )
 
     for tau in softplus_taus:
@@ -395,8 +382,6 @@ def compare_filters(
             f"Softplus τ={tau}",
             f"{soft_stats['bias']:.4f}",
             f"{soft_stats['rmse']:.4f}",
-            f"{soft_stats['weight_mean']:.2f}",
-            f"{soft_stats['above']:.2f}",
         )
 
     console.print(table)

@@ -334,7 +334,6 @@ def benchmark(
     }
     ideals = []
 
-    w0_values: List[int] = []
     trial_iter = range(n_trials)
     if progress:
         trial_iter = tqdm(
@@ -352,8 +351,6 @@ def benchmark(
         init = random_product_state(n_qubits, rng)
         obs = random_observable(n_qubits, rng)
         locs = error_locations(circuit, noise)
-        w0_value = _resolve_w0(w0_density, len(locs))
-        w0_values.append(w0_value)
 
         sim = NoisySimulator(STANDARD_GATES, noise)
         ideal = sim.ideal(circuit, obs, init)
@@ -467,9 +464,6 @@ def benchmark(
             "n_qubits": n_qubits,
             "depth": depth,
             "w0_density": w0_density,
-            "w0_mean": float(np.mean(w0_values)) if w0_values else 0.0,
-            "w0_min": int(min(w0_values)) if w0_values else 0,
-            "w0_max": int(max(w0_values)) if w0_values else 0,
             "beta_prop": beta_prop,
             "beta_thresh": beta_thresh,
             "n_samples": n_samples,
@@ -488,10 +482,7 @@ def print_benchmark_results(data: Dict) -> None:
     if config["filter_type"] == "softplus":
         label = f"softplus τ={config['softplus_tau']}"
 
-    w0_label = (
-        f"w0≈{config['w0_mean']:.1f} "
-        f"(ρ={config['w0_density']}, range {config['w0_min']}-{config['w0_max']})"
-    )
+    w0_label = f"ρ={config['w0_density']}"
 
     console.rule("Threshold PEC Results")
     console.print(
