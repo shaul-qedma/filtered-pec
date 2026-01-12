@@ -3,14 +3,14 @@ name = "filtered-pec"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.11"
 dependencies = [
-    "numpy>=2.0.2",
+    "numpy>=1.21,<2",
     "qiskit>=2.2.3",
     "qiskit-aer>=0.17.2",
     "rich>=14.2.0",
     "tqdm>=4.67.1",
     "pyyaml>=6.0.2",
-    "cirq>=0.5.556",
+    "cirq-core>=0.15,<1.0",
     "stim>=1.15.0",
 ]

@@ -29,7 +29,7 @@ from rich.console import Console
 from rich.table import Table
 from tqdm import tqdm
 
-from backend import Backend, QiskitStatevector
+from backend import Backend, QiskitStatevector, StimClifford, create_backend
 from constants import (
     CLIP_MIN, CLIP_MAX, SOFTPLUS_TAU_DEFAULT,
     MIN_SAMPLES, EPS_H_PROP, EPS_ESS, STD_DDOF,
@@ -53,6 +53,7 @@ from pec_shared import (
     STANDARD_GATES,
     CLIFFORD_2Q_GATES,
     Circuit,
+    compose_paulis,
     error_locations,
     random_circuit,
     random_basis_state,
@@ -104,15 +105,20 @@ def _compute_ideal(
     observable: str,
     initial_state: np.ndarray,
     circuit_type: str,
+    backend: Backend | None = None,
 ) -> float:
     """Compute ideal expectation value (noiseless, no insertions)."""
+    if circuit_type not in {"brickwall", "clifford"}:
+        raise ValueError(f"Unknown circuit_type: {circuit_type}")
+
+    if backend is not None:
+        empty_noise: dict = {}
+        return backend.expectation(circuit, observable, initial_state, empty_noise, {})
+
     if circuit_type == "clifford":
         from clifford import stabilizer_expectation
 
         return stabilizer_expectation(circuit, observable, initial_state)
-
-    if circuit_type != "brickwall":
-        raise ValueError(f"Unknown circuit_type: {circuit_type}")
 
     backend = QiskitStatevector()
     empty_noise: dict = {}
@@ -128,6 +134,7 @@ def generate_trials(
     noise_model_config: Optional[Dict] = None,
     progress: bool = False,
     circuit_type: str = "brickwall",
+    ideal_backend: Backend | None = None,
 ) -> List[TrialData]:
     trials: List[TrialData] = []
     trial_iter = tqdm(range(n_trials), desc="Generating trials", disable=not progress)
@@ -138,7 +145,7 @@ def generate_trials(
             noise_seed = int(noise_model_config["seed"]) + t
         noise_rng = np.random.default_rng(noise_seed) if noise_seed is not None else rng
         if circuit_type == "clifford":
-            from clifford import random_clifford_circuit
+            from clifford import random_clifford_circuit, random_stabilizer_observable
 
             circuit = random_clifford_circuit(n_qubits, depth, rng, twoq_gates)
             init = random_basis_state(n_qubits, rng)
@@ -148,9 +155,12 @@ def generate_trials(
         else:
             raise ValueError(f"Unknown circuit_type: {circuit_type}")
         noise = generate_noise_model(noise_rng, noise_model_config, twoq_gates)
-        obs = random_observable(n_qubits, rng)
+        if circuit_type == "clifford":
+            obs = random_stabilizer_observable(circuit, init, rng)
+        else:
+            obs = random_observable(n_qubits, rng)
         locs = error_locations(circuit, noise)
-        ideal = _compute_ideal(circuit, obs, init, circuit_type)
+        ideal = _compute_ideal(circuit, obs, init, circuit_type, ideal_backend)
         trials.append(
             TrialData(
                 circuit=circuit,
@@ -242,17 +252,22 @@ def _importance_sampling_estimate(
             insertions: Dict[Tuple[int, int], int] = {}
             sign = 1.0
             weight = 0
-            for v, (layer, qubit, _) in enumerate(error_locs):
+            for v, (layer, qubit, probs) in enumerate(error_locs):
                 s = int(rng.choice(4, p=sampling_probs[v]))
                 sign *= sampling_signs[v][s]
                 if s != 0:
-                    insertions[(layer, qubit)] = s
                     weight += 1
+                n = int(rng.choice(4, p=probs))
+                eff = compose_paulis(n, s)
+                if eff != 0:
+                    insertions[(layer, qubit)] = eff
 
             measurement = float(measure_func(insertions))
-            exp_val = sign * measurement
+            value = float(np.clip(measurement, -1.0, 1.0))
+            shot = 1.0 if rng.random() < (1.0 + value) / 2.0 else -1.0
+            exp_val = sign * shot
             if raw_measurements is not None:
-                raw_measurements[i] = measurement
+                raw_measurements[i] = shot
 
             h_prop = float(np.exp(-beta_prop * weight))
             h_targ = h_target(weight)
@@ -283,23 +298,30 @@ def _importance_sampling_estimate(
                 insertions: Dict[Tuple[int, int], int] = {}
                 sign = 1.0
                 weight = 0
-                for v, (layer, qubit, _) in enumerate(error_locs):
+                for v, (layer, qubit, probs) in enumerate(error_locs):
                     s = int(rng.choice(4, p=sampling_probs[v]))
                     sign *= sampling_signs[v][s]
                     if s != 0:
-                        insertions[(layer, qubit)] = s
                         weight += 1
+                    n = int(rng.choice(4, p=probs))
+                    eff = compose_paulis(n, s)
+                    if eff != 0:
+                        insertions[(layer, qubit)] = eff
                 insertions_list.append(insertions)
                 signs[i - start] = sign
                 weights[i - start] = weight
 
             measurements = measure_batch_func(insertions_list)
             if raw_measurements is not None:
-                raw_measurements[start:end] = np.array(measurements, dtype=float)
+                raw_measurements[start:end] = 0.0
             if batch_indices is not None:
                 batch_indices[start:end] = batch_id
             for j, measurement in enumerate(measurements):
-                exp_val = signs[j] * float(measurement)
+                value = float(np.clip(float(measurement), -1.0, 1.0))
+                shot = 1.0 if rng.random() < (1.0 + value) / 2.0 else -1.0
+                if raw_measurements is not None:
+                    raw_measurements[start + j] = shot
+                exp_val = signs[j] * shot
                 h_prop = float(np.exp(-beta_prop * weights[j]))
                 h_targ = h_target(int(weights[j]))
                 iw = h_targ / h_prop if h_prop > EPS_H_PROP else 0.0
@@ -484,6 +506,8 @@ def benchmark(
     """
     if backend is None:
         backend = QiskitStatevector(batch_size=batch_size)
+    if isinstance(backend, StimClifford) and circuit_type != "clifford":
+        raise ValueError("stim backend requires circuit_type='clifford'")
     
     if diagnostics is None:
         diagnostics = DEFAULT_DIAGNOSTICS.copy()
@@ -497,6 +521,7 @@ def benchmark(
             twoq_gates=twoq_gates,
             noise_model_config=noise_model_config,
             circuit_type=circuit_type,
+            ideal_backend=backend,
         )
 
     results: Dict[str, List[Dict[str, Any]]] = {
@@ -709,11 +734,17 @@ def main() -> None:
     parser.add_argument("--n-trials", type=int, default=DEFAULT_N_TRIALS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--backend", choices=["qiskit_statevector", "cirq", "stim"], default="qiskit_statevector")
+    parser.add_argument("--backend-threads", type=int, default=0)
+    parser.add_argument("--circuit-type", choices=["brickwall", "clifford"], default="brickwall")
     args = parser.parse_args()
 
     console.rule("THRESHOLD FILTER PEC VIA IMPORTANCE SAMPLING")
 
     t0 = time.time()
+    if args.backend == "stim" and args.circuit_type != "clifford":
+        raise ValueError("stim backend requires --circuit-type clifford")
+    backend = create_backend(args.backend, batch_size=args.batch_size, n_threads=args.backend_threads)
     data = benchmark(
         n_qubits=args.n_qubits,
         depth=args.depth,
@@ -726,6 +757,8 @@ def main() -> None:
         softplus_tau=args.softplus_tau,
         w0_density=args.threshold_density,
         batch_size=args.batch_size,
+        backend=backend,
+        circuit_type=args.circuit_type,
     )
 
     print_benchmark_results(data)

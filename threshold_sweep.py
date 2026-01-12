@@ -265,6 +265,7 @@ def parameter_sweep(
             twoq_gates=twoq_gates,
             noise_model_config=noise_model_config,
             circuit_type=circuit_type,
+            ideal_backend=backend,
         )
 
     console.rule(f"Parameter Sweep: {n_qubits}q, depth={depth}")
@@ -418,6 +419,7 @@ def compare_filters(
             n_trials=n_trials,
             seed=seed,
             circuit_type=circuit_type,
+            ideal_backend=backend,
         )
 
     # Threshold filter
@@ -543,6 +545,8 @@ def _run(config: dict) -> None:
     if backend_name == "stim" and circuit_type != "clifford":
         raise ValueError("stim backend requires circuit_type='clifford'.")
 
+    ideal_backend = create_backend(backend_name, batch_size=base_batch_size, n_threads=backend_threads)
+
     configs = _resolve_configs(config)
     benchmark_count = _benchmark_count(
         w0_densities=w0_densities,
@@ -566,7 +570,6 @@ def _run(config: dict) -> None:
         
         if progress:
             console.print(f"[dim]Generating {n_trials} trials for {n_qubits}q, depth={depth}...[/dim]")
-        
         trials = generate_trials(
             n_qubits=n_qubits,
             depth=depth,
@@ -576,6 +579,7 @@ def _run(config: dict) -> None:
             noise_model_config=noise_model_config,
             progress=progress,
             circuit_type=circuit_type,
+            ideal_backend=ideal_backend,
         )
         if idx == 0:
             first_trials = trials

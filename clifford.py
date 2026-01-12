@@ -64,6 +64,7 @@ def _build_clifford_catalog() -> Tuple[List[np.ndarray], List[List[str]]]:
 
 
 CLIFFORD_1Q_MATRICES, CLIFFORD_1Q_DECOMP = _build_clifford_catalog()
+CLIFFORD_1Q_KEY_TO_INDEX = {_matrix_key(mat): idx for idx, mat in enumerate(CLIFFORD_1Q_MATRICES)}
 
 
 @dataclass
@@ -215,6 +216,122 @@ def stabilizer_expectation(
         sim.do_circuit(prep)
     sim.do_circuit(stim_circuit)
     return float(sim.peek_observable_expectation(stim.PauliString(observable)))
+
+
+def _basis_bits(state: Optional[np.ndarray], n_qubits: int) -> List[int]:
+    if state is None:
+        return [0] * n_qubits
+    if state.ndim != 1 or state.size != 2 ** n_qubits:
+        raise ValueError("Clifford observables require a computational basis state.")
+    mags = np.abs(state)
+    idx = int(np.argmax(mags))
+    if not np.isclose(np.sum(mags > 1e-8), 1):
+        raise ValueError("Clifford observables require a computational basis state.")
+    return [(idx >> i) & 1 for i in range(n_qubits)]
+
+
+def _clifford_seq_for_gate(gate: Gate) -> List[str]:
+    seq = getattr(gate, "clifford_seq", None)
+    if seq is not None:
+        return list(seq)
+    cliff_idx = getattr(gate, "clifford_idx", None)
+    if cliff_idx is not None:
+        return CLIFFORD_1Q_DECOMP[int(cliff_idx)]
+    if isinstance(gate.content, np.ndarray):
+        key = _matrix_key(gate.content)
+        idx = CLIFFORD_1Q_KEY_TO_INDEX.get(key)
+        if idx is not None:
+            return CLIFFORD_1Q_DECOMP[int(idx)]
+    raise ValueError("Clifford 1Q gate missing clifford_seq/clifford_idx.")
+
+
+def _apply_1q(seq: List[str], q: int, x: np.ndarray, z: np.ndarray) -> None:
+    for op in seq:
+        if op == "H":
+            x[q], z[q] = z[q], x[q]
+        elif op == "S":
+            z[q] ^= x[q]
+        else:
+            raise ValueError(f"Unsupported Clifford op: {op}")
+
+
+def _apply_2q(name: str, q0: int, q1: int, x: np.ndarray, z: np.ndarray) -> None:
+    if name == "CNOT":
+        x[q1] ^= x[q0]
+        z[q0] ^= z[q1]
+        return
+    if name == "CNOT_R":
+        x[q0] ^= x[q1]
+        z[q1] ^= z[q0]
+        return
+    if name == "CZ":
+        z[q0] ^= x[q1]
+        z[q1] ^= x[q0]
+        return
+    if name == "SWAP":
+        x[q0], x[q1] = x[q1], x[q0]
+        z[q0], z[q1] = z[q1], z[q0]
+        return
+    raise ValueError(f"Unsupported Clifford 2Q gate: {name}")
+
+
+def _pauli_from_xz(x: np.ndarray, z: np.ndarray) -> str:
+    chars = []
+    for xi, zi in zip(x, z):
+        if xi == 0 and zi == 0:
+            chars.append("I")
+        elif xi == 1 and zi == 0:
+            chars.append("X")
+        elif xi == 0 and zi == 1:
+            chars.append("Z")
+        else:
+            chars.append("Y")
+    return "".join(chars)
+
+
+def random_stabilizer_observable(
+    circuit: Circuit,
+    initial_state: Optional[np.ndarray],
+    rng: np.random.Generator,
+) -> str:
+    n = circuit.n_qubits
+    bits = _basis_bits(initial_state, n)
+
+    mask = rng.integers(0, 2, size=n, dtype=int)
+    if not np.any(mask):
+        mask[int(rng.integers(0, n))] = 1
+
+    parity = int(sum(mask[i] * bits[i] for i in range(n)) % 2)
+    if parity == 1:
+        ones = [i for i, b in enumerate(bits) if b == 1]
+        if ones:
+            flip = int(rng.choice(ones))
+            mask[flip] ^= 1
+    if not np.any(mask):
+        zeros = [i for i, b in enumerate(bits) if b == 0]
+        if zeros:
+            mask[int(rng.choice(zeros))] = 1
+        elif n == 1:
+            mask[0] = 1
+        else:
+            picks = rng.choice(n, size=2, replace=False)
+            mask[int(picks[0])] = 1
+            mask[int(picks[1])] = 1
+
+    x = np.zeros(n, dtype=int)
+    z = mask.copy()
+
+    for layer in circuit.layers:
+        for gate in layer:
+            if isinstance(gate.content, np.ndarray):
+                q = int(gate.qubits[0])
+                seq = _clifford_seq_for_gate(gate)
+                _apply_1q(seq, q, x, z)
+            else:
+                q0, q1 = int(gate.qubits[0]), int(gate.qubits[1])
+                _apply_2q(str(gate.content), q0, q1, x, z)
+
+    return _pauli_from_xz(x, z)
 
 
 # =============================================================================

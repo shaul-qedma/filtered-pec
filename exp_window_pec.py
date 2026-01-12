@@ -18,7 +18,7 @@ from tqdm import tqdm
 from backend import Backend, QiskitStatevector
 from constants import DEFAULT_BATCH_SIZE
 from estimators import PECEstimate
-from pec_shared import ETA, Circuit
+from pec_shared import ETA, Circuit, compose_paulis
 
 console = Console()
 
@@ -116,9 +116,12 @@ def pec_estimate(
         for i in range(start, end):
             insertions = {}
             sign = 1.0
-            for v, (layer, qubit, _) in enumerate(error_locs):
+            for v, (layer, qubit, probs) in enumerate(error_locs):
                 s = rng.choice(4, p=sampling_probs[v])
-                insertions[(layer, qubit)] = s
+                n = rng.choice(4, p=probs)
+                eff = compose_paulis(int(n), int(s))
+                if eff != 0:
+                    insertions[(layer, qubit)] = eff
                 sign *= sampling_signs[v][s]
             insertions_list.append(insertions)
             signs[i - start] = sign
@@ -128,7 +131,9 @@ def pec_estimate(
         )
         
         for j, measurement in enumerate(measurements):
-            estimates[start + j] = signs[j] * measurement
+            value = float(np.clip(measurement, -1.0, 1.0))
+            shot = 1.0 if rng.random() < (1.0 + value) / 2.0 else -1.0
+            estimates[start + j] = signs[j] * shot
         if sample_bar is not None:
             sample_bar.update(end - start)
     if sample_bar is not None:

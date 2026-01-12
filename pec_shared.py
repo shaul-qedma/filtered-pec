@@ -12,6 +12,14 @@ PAULI_Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
 PAULI_Z = np.array([[1, 0], [0, -1]], dtype=complex)
 PAULIS = [PAULI_I, PAULI_X, PAULI_Y, PAULI_Z]
 
+PAULI_BITS = {
+    0: (0, 0),  # I
+    1: (1, 0),  # X
+    2: (1, 1),  # Y
+    3: (0, 1),  # Z
+}
+BITS_TO_PAULI = {v: k for k, v in PAULI_BITS.items()}
+
 
 STANDARD_GATES = {
     "CNOT": np.array([[1,0,0,0], [0,1,0,0], [0,0,0,1], [0,0,1,0]], dtype=complex),
@@ -48,6 +56,13 @@ def pauli_to_kraus(probs: np.ndarray) -> List[np.ndarray]:
         raise ValueError("probabilities must be non-negative")
     
     return [np.sqrt(p) * P for p, P in zip(probs, PAULIS)]
+
+
+def compose_paulis(a: int, b: int) -> int:
+    """Compose Pauli indices a * b, ignoring global phase."""
+    xa, za = PAULI_BITS[a]
+    xb, zb = PAULI_BITS[b]
+    return BITS_TO_PAULI[(xa ^ xb, za ^ zb)]
 
 def random_pauli_probs(rng: np.random.Generator, p_I: float) -> np.ndarray:
     """

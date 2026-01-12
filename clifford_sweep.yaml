@@ -1,0 +1,34 @@
+filter_type: threshold
+n_samples: 200
+n_trials: 6
+seed: 42
+progress: true
+skip_compare: false
+timings: true
+profile: false
+
+backend: stim
+backend_threads: 0
+batch_size: 1
+
+n_qubits: 8
+depth: 1000
+
+w0_densities: [0.30, 0.40, 0.50]
+beta_props: [0.10, 0.15, 0.20]
+beta_threshes: [0.10, 0.15, 0.20]
+softplus_taus: [0.5, 1.0, 2.0]
+
+circuit_config:
+  circuit_type: clifford
+  twoq_gates: ["CNOT", "CNOT_R", "CZ", "SWAP"]
+  noise_model:
+    type: depolarizing
+    infidelity: 0.01
+    isotropic: false
+
+autotune_candidates: [4, 8, 16]
+autotune_samples: 64
+autotune_trials: 1
+autotune_warmup: 4
+autotune_repeats: 1
