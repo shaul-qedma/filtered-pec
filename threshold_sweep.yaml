@@ -25,7 +25,7 @@ circuit_config:
     isotropic: true
     seed: 952
 
-autotune_candidates: [4, 8, 16, 32, 64]
+autotune_candidates: [4, 6, 8, 10, 12]
 autotune_samples: 128
 autotune_trials: 1
 autotune_warmup: 5

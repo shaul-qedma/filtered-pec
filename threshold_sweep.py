@@ -18,7 +18,7 @@ from rich.table import Table
 from tqdm import tqdm
 import yaml
 
-from constants import DEFAULT_QISKIT_BATCH_SIZE, SOFTPLUS_TAU_DEFAULT
+from constants import DEFAULT_BATCH_SIZE, SOFTPLUS_TAU_DEFAULT
 from threshold_pec import benchmark, generate_trials, TrialData
 
 console = Console()
@@ -158,7 +158,7 @@ def _autotune_qiskit_batch_size(
     tune_samples = max(1, min(n_samples, tune_samples))
     batch_sizes = sorted({min(int(c), tune_samples) for c in candidates if int(c) > 0})
     if not batch_sizes:
-        batch_sizes = [min(DEFAULT_QISKIT_BATCH_SIZE, tune_samples)]
+        batch_sizes = [min(DEFAULT_BATCH_SIZE, tune_samples)]
 
     trial_count = max(1, min(len(trials), tune_trials))
     trial_subset = trials[:trial_count]
@@ -230,7 +230,7 @@ def parameter_sweep(
     filter_type: str,
     softplus_taus: List[float],
     trials: Optional[List[TrialData]] = None,
-    batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     progress: bool = True,
     twoq_gates: Optional[List[str]] = None,
     noise_model_config: Optional[Dict] = None,
@@ -380,7 +380,7 @@ def compare_filters(
     beta_thresh: float,
     softplus_taus: List[float],
     trials: Optional[List[TrialData]] = None,
-    batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     progress: bool = True,
 ) -> None:
     """Compare threshold vs softplus filters."""
@@ -486,7 +486,7 @@ def _run(config: dict) -> None:
         if raw_batch.lower() != "auto":
             raise ValueError("qiskit_batch_size must be an int or 'auto'.")
         autotune_batch = True
-        base_batch_size = DEFAULT_QISKIT_BATCH_SIZE
+        base_batch_size = DEFAULT_BATCH_SIZE
     else:
         base_batch_size = int(raw_batch)
 

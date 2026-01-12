@@ -30,7 +30,7 @@ MIN_STD_SAMPLES = 2
 
 # Qiskit
 QISKIT_METHOD = "statevector"
-DEFAULT_QISKIT_BATCH_SIZE = 10
+DEFAULT_BATCH_SIZE = 10
 
 # Circuit defaults
 DEFAULT_N_QUBITS = 8

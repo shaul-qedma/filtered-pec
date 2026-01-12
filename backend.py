@@ -10,7 +10,7 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 
-from constants import DEFAULT_QISKIT_BATCH_SIZE, QISKIT_METHOD
+from constants import DEFAULT_BATCH_SIZE, QISKIT_METHOD
 from pec_shared import Circuit
 
 
@@ -50,7 +50,7 @@ class Backend(ABC):
 class QiskitStatevector(Backend):
     """Qiskit Aer statevector simulation backend."""
     
-    def __init__(self, batch_size: int = DEFAULT_QISKIT_BATCH_SIZE):
+    def __init__(self, batch_size: int = DEFAULT_BATCH_SIZE):
         self.batch_size = batch_size
         self._qiskit = None
         self._noise_cache: Dict[int, dict] = {}
@@ -434,7 +434,7 @@ class CirqSimulator(Backend):
 
 def create_backend(
     name: str = "qiskit_statevector",
-    batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     shots: int = 1024,
     n_threads: int = 0,
 ) -> Backend:

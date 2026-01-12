@@ -36,7 +36,7 @@ from constants import (
     SEED_OFFSET_FULL, SEED_OFFSET_EXP, SEED_OFFSET_FILTERED,
     DEFAULT_N_QUBITS, DEFAULT_DEPTH, DEFAULT_BETA_PROP, DEFAULT_BETA_THRESH,
     DEFAULT_N_SAMPLES, DEFAULT_N_TRIALS, DEFAULT_SEED,
-    MIN_STD_SAMPLES, DEFAULT_QISKIT_BATCH_SIZE,
+    MIN_STD_SAMPLES, DEFAULT_BATCH_SIZE,
 )
 from diagnostics import (
     DEFAULT_DIAGNOSTICS,
@@ -381,7 +381,7 @@ def threshold_pec_estimate(
     h_target: Optional[Callable[[int], float]] = None,
     w0_density: float = 0.30,
     backend: Backend | None = None,
-    batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     diagnostics: Optional[Dict[str, bool]] = None,
     progress: bool = False,
 ) -> ThresholdPECEstimate:
@@ -454,7 +454,7 @@ def benchmark(
     compute_exp: bool = True,
     compute_filtered: bool = True,
     backend: Backend | None = None,
-    batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     progress: bool = True,
     diagnostics: Optional[Dict[str, bool]] = None,
     twoq_gates: Optional[List[str]] = None,
@@ -687,7 +687,7 @@ def main() -> None:
     parser.add_argument("--n-samples", type=int, default=DEFAULT_N_SAMPLES)
     parser.add_argument("--n-trials", type=int, default=DEFAULT_N_TRIALS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_QISKIT_BATCH_SIZE)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     args = parser.parse_args()
 
     console.rule("THRESHOLD FILTER PEC VIA IMPORTANCE SAMPLING")
