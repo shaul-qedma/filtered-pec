@@ -79,9 +79,20 @@ class QiskitStatevector(Backend):
     """Qiskit statevector backend for unitary circuits with Pauli insertions."""
 
     def __init__(self, batch_size: int = DEFAULT_BATCH_SIZE):
-        if QuantumCircuit is None or Statevector is None:
+        if (
+            QuantumCircuit is None
+            or UnitaryGate is None
+            or Operator is None
+            or Pauli is None
+            or Statevector is None
+        ):
             raise ImportError("Qiskit required.")
         self.batch_size = batch_size
+        self._QuantumCircuit = cast(Any, QuantumCircuit)
+        self._UnitaryGate = cast(Any, UnitaryGate)
+        self._Operator = cast(Any, Operator)
+        self._Pauli = cast(Any, Pauli)
+        self._Statevector = cast(Any, Statevector)
 
     def _to_statevector(self, state: np.ndarray, n_qubits: int) -> np.ndarray:
         """Convert state to Qiskit qubit ordering."""
@@ -97,12 +108,12 @@ class QiskitStatevector(Backend):
     ):
         """Build Qiskit circuit with Pauli insertions."""
         n = circuit.n_qubits
-        qc = QuantumCircuit(n)
+        qc = self._QuantumCircuit(n)
 
         for l, layer in enumerate(circuit.layers):
             for gate in layer:
                 if isinstance(gate.content, np.ndarray):
-                    qc.append(UnitaryGate(gate.content), [gate.qubits[0]])
+                    qc.append(self._UnitaryGate(gate.content), [gate.qubits[0]])
                     continue
 
                 name = gate.content
@@ -156,12 +167,12 @@ class QiskitStatevector(Backend):
             insertions_list = [{}]
 
         init_sv = self._to_statevector(initial_state, circuit.n_qubits)
-        pauli_obs = Operator(Pauli(observable[::-1]))
+        pauli_obs = self._Operator(self._Pauli(observable[::-1]))
 
         values = []
         for insertions in insertions_list:
             qc = self._build_circuit(circuit, insertions)
-            sv = Statevector(init_sv).evolve(qc)
+            sv = self._Statevector(init_sv).evolve(qc)
             values.append(float(np.real(sv.expectation_value(pauli_obs))))
 
         return values
