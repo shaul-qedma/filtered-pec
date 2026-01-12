@@ -1,0 +1,37 @@
+# constants.py
+"""
+Shared constants across modules.
+"""
+
+# Numerical constants
+CLIP_MIN = -20.0
+CLIP_MAX = 20.0
+EPS_H_PROP = 1e-15
+EPS_ESS = 1e-12
+STD_DDOF = 1
+
+# Default parameters
+DEFAULT_INFIDELITY = 0.01
+DEFAULT_BETA_PROP = 0.15
+DEFAULT_BETA_THRESH = 0.2
+DEFAULT_N_SAMPLES = 100
+DEFAULT_N_TRIALS = 10
+DEFAULT_SEED = 42
+SOFTPLUS_TAU_DEFAULT = 1.0
+
+# Seed offsets for reproducibility
+SEED_OFFSET_FULL = 1000
+SEED_OFFSET_EXP = 2000
+SEED_OFFSET_FILTERED = 3000
+
+# Sampling constraints
+MIN_SAMPLES = 1
+MIN_STD_SAMPLES = 2
+
+# Qiskit
+QISKIT_METHOD = "statevector"
+DEFAULT_QISKIT_BATCH_SIZE = 10
+
+# Circuit defaults
+DEFAULT_N_QUBITS = 8
+DEFAULT_DEPTH = 500

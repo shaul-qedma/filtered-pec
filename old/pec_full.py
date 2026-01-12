@@ -5,7 +5,7 @@ Standard PEC: unbiased, exponential overhead, IID sampling.
 """
 
 import numpy as np
-from pec_shared import NoisySimulator, Circuit, error_locations, quasi_probs
+from pec_shared import error_locations, quasi_probs
 
 def full_pec_estimate(simulator, circuit, obs, init, n_samples, seed=None):
     """Full PEC estimator. Returns (estimate, std_error, overhead)."""
@@ -38,6 +38,7 @@ def full_pec_estimate(simulator, circuit, obs, init, n_samples, seed=None):
 if __name__ == "__main__":
     from pec_shared import (STANDARD_GATES, random_circuit, random_noise_model,
                             random_product_state, random_observable)
+    from old.sim import NoisySimulator
     rng = np.random.default_rng(42)
     circuit = random_circuit(3, 2, rng)
     noise = random_noise_model(rng)

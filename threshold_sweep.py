@@ -8,9 +8,8 @@ import argparse
 import cProfile
 import io
 import pstats
-import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 from rich import box
@@ -19,20 +18,37 @@ from rich.table import Table
 from tqdm import tqdm
 import yaml
 
-from exp_window_pec import DEFAULT_QISKIT_BATCH_SIZE
+from constants import DEFAULT_QISKIT_BATCH_SIZE, SOFTPLUS_TAU_DEFAULT
 from threshold_pec import benchmark, generate_trials, TrialData
 
 console = Console()
-DEFAULT_SOFTPLUS_TAU = 1.0
 DEFAULT_CONFIG_SEED_OFFSET = 1000
 
 _BATCH_SIZE_CACHE: Dict[Tuple[int, int], int] = {}
+
 
 def _load_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     if not isinstance(data, dict):
         raise ValueError("Sweep config must be a mapping.")
+    
+    # Validate noise_model if present in circuit_config
+    circuit_config = data.get("circuit_config", {})
+    if "noise_model" in circuit_config:
+        nm = circuit_config["noise_model"]
+        valid_types = {"kraus", "pauli", "per_gate", "depolarizing"}
+        nm_type = nm.get("type")
+        if nm_type not in valid_types:
+            raise ValueError(f"noise_model.type must be one of {valid_types}, got '{nm_type}'")
+        
+        if nm_type == "per_gate":
+            if nm.get("gates") is None:
+                raise ValueError("per_gate type requires 'gates' configuration")
+        elif nm_type == "depolarizing":
+            if nm.get("infidelity") is None:
+                raise ValueError("depolarizing type requires 'infidelity' field")
+    
     return data
 
 
@@ -61,94 +77,20 @@ def _resolve_configs(config: dict) -> List[Tuple[int, int]]:
         return resolved
 
     if "auto_configs" in config:
-        auto = config["auto_configs"]
-        if not isinstance(auto, dict):
-            raise ValueError("auto_configs must be a mapping.")
-        qubits = _require_list(auto, "qubits")
-        depths = _require_list(auto, "depths")
-        ratios = _require_list(auto, "ratios")
-        min_volume = int(auto["min_volume"])
-        max_volume = int(auto["max_volume"])
-        per_ratio = int(auto["per_ratio"])
-        max_configs = int(auto["max_configs"])
-        return auto_configs(
-            qubits=qubits,
-            depths=depths,
-            min_volume=min_volume,
-            max_volume=max_volume if max_volume > 0 else None,
-            ratios=ratios,
-            per_ratio=max(1, per_ratio),
-            max_configs=max(0, max_configs),
-        )
+        raise ValueError("auto_configs is no longer supported. Use 'configs' instead.")
 
     if "n_qubits" in config or "depth" in config:
         if "n_qubits" not in config or "depth" not in config:
             raise ValueError("Both n_qubits and depth must be provided for a single config.")
         return [(int(config["n_qubits"]), int(config["depth"]))]
 
-    raise ValueError("Config must define configs, auto_configs, or n_qubits/depth.")
+    raise ValueError("Config must define configs, or n_qubits/depth.")
 
 
 def estimate_error_locs(n_qubits: int, depth: int) -> int:
     twoq_layers = depth // 2
     gates_per_layer = n_qubits // 2
     return 2 * gates_per_layer * twoq_layers
-
-
-def auto_configs(
-    qubits: List[int],
-    depths: List[int],
-    min_volume: int,
-    max_volume: Optional[int],
-    ratios: List[float],
-    per_ratio: int,
-    max_configs: int,
-) -> List[Tuple[int, int]]:
-    candidates: List[Tuple[int, int, int, float]] = []
-    for n in qubits:
-        for d in depths:
-            volume = estimate_error_locs(n, d)
-            if volume < min_volume:
-                continue
-            if max_volume is not None and volume > max_volume:
-                continue
-            ratio = d / n if n else 0.0
-            candidates.append((n, d, volume, ratio))
-
-    if not candidates:
-        raise ValueError("No configurations match the volume constraints.")
-
-    volume_mid = min_volume
-    if max_volume is not None:
-        volume_mid = 0.5 * (min_volume + max_volume)
-
-    chosen: List[Tuple[int, int]] = []
-    used = set()
-
-    if ratios:
-        for r in ratios:
-            ranked = sorted(
-                candidates,
-                key=lambda c: (abs(c[3] - r), abs(c[2] - volume_mid), c[2]),
-            )
-            picked = 0
-            for n, d, _, _ in ranked:
-                if (n, d) in used:
-                    continue
-                chosen.append((n, d))
-                used.add((n, d))
-                picked += 1
-                if picked >= per_ratio:
-                    break
-
-    if not chosen:
-        ranked = sorted(candidates, key=lambda c: (c[2], c[3]))
-        chosen = [(n, d) for n, d, _, _ in ranked]
-
-    if max_configs > 0 and len(chosen) > max_configs:
-        chosen = chosen[:max_configs]
-
-    return chosen
 
 
 def _summary_from_filtered(results: List[dict]) -> dict:
@@ -196,6 +138,7 @@ def _autotune_qiskit_batch_size(
     tune_trials: int,
     warmup_repeats: int,
     timed_repeats: int,
+    progress: bool = True,
 ) -> int:
     key = (n_qubits, depth)
     if key in _BATCH_SIZE_CACHE:
@@ -221,7 +164,9 @@ def _autotune_qiskit_batch_size(
     trial_subset = trials[:trial_count]
     best_size = batch_sizes[0]
     best_time = float("inf")
-    for batch_size in batch_sizes:
+    
+    batch_iter = tqdm(batch_sizes, desc="Autotuning batch size", disable=not progress)
+    for batch_size in batch_iter:
         for warmup_idx in range(warmup_repeats):
             benchmark(
                 n_qubits=n_qubits,
@@ -233,13 +178,12 @@ def _autotune_qiskit_batch_size(
                 seed=seed + 1000 + warmup_idx,
                 filter_type=filter_type,
                 softplus_tau=softplus_tau,
-                use_qiskit=True,
                 w0_density=w0_density,
                 trials=trial_subset,
                 compute_full=False,
                 compute_exp=False,
                 compute_filtered=True,
-                qiskit_batch_size=batch_size,
+                batch_size=batch_size,
                 progress=False,
             )
 
@@ -256,13 +200,12 @@ def _autotune_qiskit_batch_size(
                 seed=seed + 2000 + rep,
                 filter_type=filter_type,
                 softplus_tau=softplus_tau,
-                use_qiskit=True,
                 w0_density=w0_density,
                 trials=trial_subset,
                 compute_full=False,
                 compute_exp=False,
                 compute_filtered=True,
-                qiskit_batch_size=batch_size,
+                batch_size=batch_size,
                 progress=False,
             )
             elapsed_runs.append(time.perf_counter() - start)
@@ -286,167 +229,144 @@ def parameter_sweep(
     beta_thresh_values: List[float],
     filter_type: str,
     softplus_taus: List[float],
-    use_qiskit: bool,
-    trials: List[TrialData],
-    qiskit_batch_size: int,
-    progress: bool,
-) -> List[dict]:
-    console.rule("THRESHOLD PEC PARAMETER SWEEP")
-
-    volume = estimate_error_locs(n_qubits, depth)
-    console.print(f"Circuit: {n_qubits} qubits, depth {depth}, volume={volume}")
-    console.print(f"Samples: {n_samples}, Trials: {len(trials)}, Qiskit={use_qiskit}")
-
-    benchmark_total = _benchmark_count(
-        w0_densities=w0_densities,
-        beta_prop_values=beta_prop_values,
-        beta_thresh_values=beta_thresh_values,
-        filter_type=filter_type,
-        softplus_taus=softplus_taus,
-    )
-    show_progress = progress and sys.stderr.isatty()
-    with tqdm(
-        total=benchmark_total,
-        desc=f"Sweep {n_qubits}q d{depth}",
-        unit="bench",
-        dynamic_ncols=True,
-        leave=False,
-        disable=not show_progress,
-    ) as bench_bar:
-        data_full = benchmark(
+    trials: Optional[List[TrialData]] = None,
+    batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
+    progress: bool = True,
+    twoq_gates: Optional[List[str]] = None,
+    noise_model_config: Optional[Dict] = None,
+) -> Dict[str, Any]:
+    """
+    Run parameter sweep over w0_density, beta_prop, beta_thresh, and optionally softplus_tau.
+    """
+    if trials is None:
+        trials = generate_trials(
             n_qubits=n_qubits,
             depth=depth,
-            beta_prop=0.0,
-            beta_thresh=0.0,
+            n_trials=n_trials,
+            seed=seed,
+            twoq_gates=twoq_gates,
+            noise_model_config=noise_model_config,
+        )
+
+    console.rule(f"Parameter Sweep: {n_qubits}q, depth={depth}")
+    console.print(f"Samples: {n_samples}, Trials: {n_trials}, Batch size: {batch_size}")
+
+    # Baseline: exponential window only
+    baseline_data = benchmark(
+        n_qubits=n_qubits,
+        depth=depth,
+        beta_prop=beta_prop_values[0],
+        beta_thresh=0.0,
+        n_samples=n_samples,
+        n_trials=n_trials,
+        seed=seed,
+        filter_type=filter_type,
+        softplus_tau=softplus_taus[0] if softplus_taus else SOFTPLUS_TAU_DEFAULT,
+        w0_density=w0_densities[0],
+        trials=trials,
+        compute_full=True,
+        compute_exp=True,
+        compute_filtered=False,
+        batch_size=batch_size,
+        progress=progress,
+    )
+
+    full_results = baseline_data["results"]["full_pec"]
+    exp_results = baseline_data["results"]["exp_window"]
+    
+    if full_results:
+        full_rmse = float(np.sqrt(np.mean([d["error"] ** 2 for d in full_results])))
+        console.print(f"Full PEC RMSE: {full_rmse:.4f}")
+    if exp_results:
+        exp_rmse = float(np.sqrt(np.mean([d["error"] ** 2 for d in exp_results])))
+        console.print(f"Exp Window RMSE: {exp_rmse:.4f}")
+
+    # Sweep results
+    sweep_results: List[Dict[str, Any]] = []
+    
+    tau_values = softplus_taus if filter_type == "softplus" else [SOFTPLUS_TAU_DEFAULT]
+    
+    total_combos = len(w0_densities) * len(beta_prop_values) * len(beta_thresh_values) * len(tau_values)
+    combo_iter = tqdm(
+        [(w0, bp, bt, tau) 
+         for w0 in w0_densities 
+         for bp in beta_prop_values 
+         for bt in beta_thresh_values
+         for tau in tau_values],
+        desc="Sweep",
+        total=total_combos,
+        disable=not progress,
+    )
+    
+    for w0_density, beta_prop, beta_thresh, tau in combo_iter:
+        data = benchmark(
+            n_qubits=n_qubits,
+            depth=depth,
+            beta_prop=beta_prop,
+            beta_thresh=beta_thresh,
             n_samples=n_samples,
             n_trials=n_trials,
             seed=seed,
-            filter_type="threshold",
-            softplus_tau=DEFAULT_SOFTPLUS_TAU,
-            use_qiskit=use_qiskit,
-            w0_density=w0_densities[0],
+            filter_type=filter_type,
+            softplus_tau=tau,
+            w0_density=w0_density,
             trials=trials,
-            compute_full=True,
+            compute_full=False,
             compute_exp=False,
-            compute_filtered=False,
-            qiskit_batch_size=qiskit_batch_size,
+            compute_filtered=True,
+            batch_size=batch_size,
             progress=False,
         )
-        bench_bar.update(1)
-        full_errors = np.array([d["error"] for d in data_full["results"]["full_pec"]])
-        full_rmse = float(np.sqrt(np.mean(full_errors**2)))
-        full_qp_norm = float(
-            np.mean(np.array([d["qp_norm"] for d in data_full["results"]["full_pec"]], dtype=float))
-        )
-        full_bias = float(np.mean(full_errors))
+        
+        stats = _summary_from_filtered(data["results"]["filtered"])
+        sweep_results.append({
+            "w0_density": w0_density,
+            "beta_prop": beta_prop,
+            "beta_thresh": beta_thresh,
+            "softplus_tau": tau,
+            **stats,
+        })
 
-        results = []
+    # Print results table
+    table = Table(box=box.ASCII)
+    table.add_column("ρ")
+    table.add_column("β_prop")
+    table.add_column("β_thresh")
+    if filter_type == "softplus":
+        table.add_column("τ")
+    table.add_column("Bias", justify="right")
+    table.add_column("RMSE", justify="right")
+    table.add_column("ESS", justify="right")
+    table.add_column("qp_norm", justify="right")
 
-        table = Table(box=box.ASCII)
-        table.add_column("Method")
-        table.add_column("ρ", justify="right")
-        table.add_column("w0", justify="right")
-        table.add_column("β_prop", justify="right")
-        table.add_column("β_thresh", justify="right")
+    for r in sweep_results:
+        row = [
+            f"{r['w0_density']:.2f}",
+            f"{r['beta_prop']:.2f}",
+            f"{r['beta_thresh']:.2f}",
+        ]
         if filter_type == "softplus":
-            table.add_column("τ", justify="right")
-        table.add_column("qp_norm", justify="right")
-        table.add_column("Bias", justify="right")
-        table.add_column("RMSE", justify="right")
-        table.add_column("ESS", justify="right")
-        table.add_column("vs Full", justify="right")
-
-        full_row = ["Full", "-"]
-        full_row.extend(["-", "-", "-"])
-        if filter_type == "softplus":
-            full_row.append("-")
-        full_row.extend(
-            [
-                f"{full_qp_norm:.2f}",
-                f"{full_bias:.4f}",
-                f"{full_rmse:.4f}",
-                "-",
-                "baseline",
-            ]
-        )
-        table.add_row(*full_row)
-
-        for rho in w0_densities:
-            for beta_prop in beta_prop_values:
-                for beta_thresh in beta_thresh_values:
-                    taus = softplus_taus if filter_type == "softplus" else [DEFAULT_SOFTPLUS_TAU]
-                    for tau in taus:
-                        data = benchmark(
-                            n_qubits=n_qubits,
-                            depth=depth,
-                            beta_prop=beta_prop,
-                            beta_thresh=beta_thresh,
-                            n_samples=n_samples,
-                            n_trials=n_trials,
-                            seed=seed,
-                            filter_type=filter_type,
-                            softplus_tau=tau,
-                            use_qiskit=use_qiskit,
-                            w0_density=rho,
-                            trials=trials,
-                            compute_full=False,
-                            compute_exp=False,
-                            compute_filtered=True,
-                            qiskit_batch_size=qiskit_batch_size,
-                            progress=False,
-                        )
-                        bench_bar.update(1)
-
-                        stats = _summary_from_filtered(data["results"]["filtered"])
-                        vs_full = 100.0 * (stats["rmse"] / full_rmse - 1)
-
-                        row = {
-                            "w0_density": rho,
-                            "beta_prop": beta_prop,
-                            "beta_thresh": beta_thresh,
-                            "tau": tau,
-                            "qp_norm": stats["qp_norm"],
-                            "bias": stats["bias"],
-                            "rmse": stats["rmse"],
-                            "ess": stats["ess"],
-                            "vs_full": vs_full,
-                            "w0_mean": data["config"]["w0_mean"],
-                        }
-                        results.append(row)
-
-                        row = ["softplus" if filter_type == "softplus" else "threshold", f"{rho:.2f}"]
-                        row.append(f"{data['config']['w0_mean']:.1f}")
-                        row.append(f"{beta_prop:.2f}")
-                        row.append(f"{beta_thresh:.2f}")
-                        if filter_type == "softplus":
-                            row.append(f"{tau:.2f}")
-                        row.extend(
-                            [
-                                f"{stats['qp_norm']:.2f}",
-                                f"{stats['bias']:.4f}",
-                                f"{stats['rmse']:.4f}",
-                                f"{stats['ess']:.1f}",
-                                f"{vs_full:+.1f}%",
-                            ]
-                        )
-                        table.add_row(*row)
+            row.append(f"{r['softplus_tau']:.1f}")
+        row.extend([
+            f"{r['bias']:.4f}",
+            f"{r['rmse']:.4f}",
+            f"{r['ess']:.1f}",
+            f"{r['qp_norm']:.1f}",
+        ])
+        table.add_row(*row)
 
     console.print(table)
-    best = min(results, key=lambda r: r["rmse"])
-    console.print("Best configuration:")
-    if filter_type == "softplus":
-        console.print(
-            f"  ρ={best['w0_density']}, w0≈{best['w0_mean']:.1f}, "
-            f"β_prop={best['beta_prop']}, β_thresh={best['beta_thresh']}, τ={best['tau']}"
-        )
-    else:
-        console.print(
-            f"  ρ={best['w0_density']}, w0≈{best['w0_mean']:.1f}, "
-            f"β_prop={best['beta_prop']}, β_thresh={best['beta_thresh']}"
-        )
-    console.print(f"  RMSE = {best['rmse']:.4f} ({best['vs_full']:+.1f}% vs Full PEC)")
 
-    return results
+    # Find best configuration
+    best = min(sweep_results, key=lambda x: x["rmse"])
+    console.print(f"\nBest config: ρ={best['w0_density']}, β_prop={best['beta_prop']}, "
+                  f"β_thresh={best['beta_thresh']}, RMSE={best['rmse']:.4f}")
+
+    return {
+        "baseline": baseline_data,
+        "sweep": sweep_results,
+        "best": best,
+    }
 
 
 def compare_filters(
@@ -459,13 +379,22 @@ def compare_filters(
     beta_prop: float,
     beta_thresh: float,
     softplus_taus: List[float],
-    use_qiskit: bool,
     trials: Optional[List[TrialData]] = None,
-    qiskit_batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
-    progress: bool = False,
+    batch_size: int = DEFAULT_QISKIT_BATCH_SIZE,
+    progress: bool = True,
 ) -> None:
-    console.rule("THRESHOLD vs SOFTPLUS FILTER COMPARISON")
+    """Compare threshold vs softplus filters."""
+    console.rule("Filter Comparison: Threshold vs Softplus")
 
+    if trials is None:
+        trials = generate_trials(
+            n_qubits=n_qubits,
+            depth=depth,
+            n_trials=n_trials,
+            seed=seed,
+        )
+
+    # Threshold filter
     data_thresh = benchmark(
         n_qubits=n_qubits,
         depth=depth,
@@ -475,28 +404,28 @@ def compare_filters(
         n_trials=n_trials,
         seed=seed,
         filter_type="threshold",
-        softplus_tau=DEFAULT_SOFTPLUS_TAU,
-        use_qiskit=use_qiskit,
         w0_density=w0_density,
         trials=trials,
-        qiskit_batch_size=qiskit_batch_size,
+        compute_full=False,
+        compute_exp=False,
+        compute_filtered=True,
+        batch_size=batch_size,
         progress=progress,
     )
     thresh_stats = _summary_from_filtered(data_thresh["results"]["filtered"])
 
-    w0_label = f"ρ={w0_density}, w0≈{data_thresh['config']['w0_mean']:.1f}"
-
-    console.print(f"Config: {n_qubits}q, depth={depth}, {w0_label}, β_prop={beta_prop}, β_thresh={beta_thresh}")
     table = Table(box=box.ASCII)
     table.add_column("Filter")
     table.add_column("Bias", justify="right")
     table.add_column("RMSE", justify="right")
+
     table.add_row(
         "Threshold",
         f"{thresh_stats['bias']:.4f}",
         f"{thresh_stats['rmse']:.4f}",
     )
 
+    # Softplus filters
     for tau in softplus_taus:
         data_soft = benchmark(
             n_qubits=n_qubits,
@@ -508,10 +437,12 @@ def compare_filters(
             seed=seed,
             filter_type="softplus",
             softplus_tau=tau,
-            use_qiskit=use_qiskit,
             w0_density=w0_density,
             trials=trials,
-            qiskit_batch_size=qiskit_batch_size,
+            compute_full=False,
+            compute_exp=False,
+            compute_filtered=True,
+            batch_size=batch_size,
             progress=progress,
         )
         soft_stats = _summary_from_filtered(data_soft["results"]["filtered"])
@@ -544,7 +475,6 @@ def _run(config: dict) -> None:
     n_samples = int(config["n_samples"])
     n_trials = int(config["n_trials"])
     seed = int(config["seed"])
-    use_qiskit = config["use_qiskit"]
     progress = config["progress"]
     skip_compare = config["skip_compare"]
     timings = config["timings"]
@@ -566,6 +496,11 @@ def _run(config: dict) -> None:
     autotune_warmup = int(config["autotune_warmup"])
     autotune_repeats = int(config["autotune_repeats"])
 
+    # Circuit generation configuration
+    circuit_config = config.get("circuit_config", {})
+    twoq_gates = circuit_config.get("twoq_gates")
+    noise_model_config = circuit_config.get("noise_model")
+
     configs = _resolve_configs(config)
     benchmark_count = _benchmark_count(
         w0_densities=w0_densities,
@@ -586,20 +521,29 @@ def _run(config: dict) -> None:
         if idx:
             console.rule()
         config_seed = seed + idx * DEFAULT_CONFIG_SEED_OFFSET
+        
+        if progress:
+            console.print(f"[dim]Generating {n_trials} trials for {n_qubits}q, depth={depth}...[/dim]")
+        
         trials = generate_trials(
             n_qubits=n_qubits,
             depth=depth,
             n_trials=n_trials,
             seed=config_seed,
+            twoq_gates=twoq_gates,
+            noise_model_config=noise_model_config,
+            progress=progress,
         )
         if idx == 0:
             first_trials = trials
             first_config = (n_qubits, depth)
 
-        qiskit_batch_size = base_batch_size
-        if use_qiskit and autotune_batch:
-            tune_tau = softplus_taus[0] if filter_type == "softplus" else DEFAULT_SOFTPLUS_TAU
-            qiskit_batch_size = _autotune_qiskit_batch_size(
+        batch_size = base_batch_size
+        if autotune_batch:
+            if progress:
+                console.print(f"[dim]Autotuning batch size for {n_qubits}q, depth={depth}...[/dim]")
+            tune_tau = softplus_taus[0] if filter_type == "softplus" else SOFTPLUS_TAU_DEFAULT
+            batch_size = _autotune_qiskit_batch_size(
                 n_qubits=n_qubits,
                 depth=depth,
                 trials=trials,
@@ -615,12 +559,13 @@ def _run(config: dict) -> None:
                 tune_trials=autotune_trials,
                 warmup_repeats=autotune_warmup,
                 timed_repeats=autotune_repeats,
+                progress=progress,
             )
             if progress:
-                console.print(f"Auto-tuned Qiskit batch size: {qiskit_batch_size}")
+                console.print(f"Auto-tuned batch size: {batch_size}")
 
         if idx == 0:
-            first_batch_size = qiskit_batch_size
+            first_batch_size = batch_size
 
         config_start = time.perf_counter()
         parameter_sweep(
@@ -634,9 +579,8 @@ def _run(config: dict) -> None:
             beta_thresh_values=beta_thresh_values,
             filter_type=filter_type,
             softplus_taus=softplus_taus,
-            use_qiskit=use_qiskit,
             trials=trials,
-            qiskit_batch_size=qiskit_batch_size,
+            batch_size=batch_size,
             progress=progress,
         )
         elapsed = time.perf_counter() - config_start
@@ -665,9 +609,8 @@ def _run(config: dict) -> None:
             beta_prop=beta_prop_values[0],
             beta_thresh=beta_thresh_values[0],
             softplus_taus=softplus_taus,
-            use_qiskit=use_qiskit,
             trials=first_trials,
-            qiskit_batch_size=first_batch_size or base_batch_size,
+            batch_size=first_batch_size or base_batch_size,
             progress=progress,
         )
 

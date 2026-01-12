@@ -1,34 +1,38 @@
+# threshold_sweep_full.yaml - Full sweep for 8q, depth=500
+
 filter_type: threshold
 n_samples: 500
 n_trials: 8
 seed: 42
-use_qiskit: true
 progress: true
 skip_compare: false
-timings: false
+timings: true           # Track timing per config
 
-auto_configs:
-  qubits: [4, 5, 6, 7, 8]
-  depths: [6, 8, 10, 12, 14]
-  min_volume: 24
-  max_volume: 64
-  ratios: [0.75, 1.0, 1.5, 2.0]
-  per_ratio: 2
-  max_configs: 0
+n_qubits: 8
+depth: 500
 
 w0_densities: [0.40, 0.50, 0.60]
 beta_props: [0.15, 0.20]
 beta_threshes: [0.10, 0.15, 0.20]
 softplus_taus: [0.5, 1.0, 2.0]
 
-qiskit_batch_size: auto
-autotune_candidates: [4, 8, 16, 32, 64]
-autotune_samples: 200
-autotune_trials: 2
-autotune_warmup: 1
-autotune_repeats: 3
+circuit_config:
+  twoq_gates: ["CNOT", "CNOT_R", "CZ", "SWAP"]
+  noise_model:
+    type: depolarizing
+    infidelity: 0.01
+    isotropic: true
+    seed: 952
+# Fixed batch size - skip expensive autotuning
+qiskit_batch_size: 16
 
-profile: false
+autotune_candidates: [16]
+autotune_samples: 50
+autotune_trials: 1
+autotune_warmup: 0
+autotune_repeats: 1
+
+profile: true
 profile_out: threshold_sweep.prof
 profile_top: 30
 profile_sort: cumulative

@@ -2,15 +2,16 @@
 
 import numpy as np
 from dataclasses import dataclass
+from typing import Union, Dict, List, Tuple, Optional
 
 ETA = np.array([[+1,+1,+1,+1], [+1,+1,-1,-1], [+1,-1,+1,-1], [+1,-1,-1,+1]], dtype=np.float64)
 
-PAULI = [
-    np.eye(2, dtype=complex),
-    np.array([[0, 1], [1, 0]], dtype=complex),
-    np.array([[0, -1j], [1j, 0]], dtype=complex),
-    np.array([[1, 0], [0, -1]], dtype=complex)
-]
+PAULI_I = np.array([[1, 0], [0, 1]], dtype=complex)
+PAULI_X = np.array([[0, 1], [1, 0]], dtype=complex)
+PAULI_Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+PAULI_Z = np.array([[1, 0], [0, -1]], dtype=complex)
+PAULIS = [PAULI_I, PAULI_X, PAULI_Y, PAULI_Z]
+
 
 STANDARD_GATES = {
     "CNOT": np.array([[1,0,0,0], [0,1,0,0], [0,0,0,1], [0,0,1,0]], dtype=complex),
@@ -33,8 +34,59 @@ class Circuit:
     n_qubits: int
     layers: list
 
-def pauli_kraus(p):
-    return tuple(np.sqrt(p[i]) * PAULI[i] for i in range(4))
+def pauli_to_kraus(probs: np.ndarray) -> List[np.ndarray]:
+    """
+    Convert Pauli probabilities [p_I, p_X, p_Y, p_Z] to Kraus operators.
+    
+    Returns list of 4 Kraus operators K_i = sqrt(p_i) * P_i
+    """
+    if len(probs) != 4:
+        raise ValueError("probs must have exactly 4 elements [p_I, p_X, p_Y, p_Z]")
+    if not np.isclose(sum(probs), 1.0):
+        raise ValueError(f"probabilities must sum to 1, got {sum(probs)}")
+    if any(p < 0 for p in probs):
+        raise ValueError("probabilities must be non-negative")
+    
+    return [np.sqrt(p) * P for p, P in zip(probs, PAULIS)]
+
+def random_pauli_probs(rng: np.random.Generator, p_I: float) -> np.ndarray:
+    """
+    Generate random Pauli probabilities with fixed identity probability.
+    
+    Args:
+        rng: Random number generator
+        p_I: Probability of identity (no error). Must be in [0, 1].
+    
+    Returns:
+        Array [p_I, p_X, p_Y, p_Z] summing to 1
+    """
+    if not 0 <= p_I <= 1:
+        raise ValueError(f"p_I must be in [0, 1], got {p_I}")
+    
+    rest = 1.0 - p_I
+    if rest < 1e-15:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    
+    # Random partition of remaining probability
+    cuts = np.sort(rng.uniform(0, rest, size=2))
+    p_X = cuts[0]
+    p_Y = cuts[1] - cuts[0]
+    p_Z = rest - cuts[1]
+    
+    return np.array([p_I, p_X, p_Y, p_Z])
+
+
+def depolarizing_probs(p_I: float) -> np.ndarray:
+    """
+    Generate symmetric depolarizing channel probabilities.
+    
+    For depolarizing: p_X = p_Y = p_Z = (1 - p_I) / 3
+    """
+    if not 0 <= p_I <= 1:
+        raise ValueError(f"p_I must be in [0, 1], got {p_I}")
+    
+    p_error = (1.0 - p_I) / 3.0
+    return np.array([p_I, p_error, p_error, p_error])
 
 def kraus_to_probs(kraus):
     return np.array([np.real(np.trace(K.conj().T @ K)) / 2 for K in kraus])
@@ -42,74 +94,6 @@ def kraus_to_probs(kraus):
 def quasi_probs(p):
     lam = ETA @ p
     return 0.25 * ETA @ (1.0 / lam)
-
-class NoisySimulator:
-    def __init__(self, gate_library, noise_model):
-        self.gates = gate_library
-        self.noise = noise_model
-    
-    def _apply_1q(self, state, U, q, n):
-        state = state.reshape([2] * n)
-        state = np.moveaxis(state, q, 0)
-        shape = state.shape
-        state = U @ state.reshape(2, -1)
-        state = np.moveaxis(state.reshape(shape), 0, q)
-        return state.reshape(-1)
-
-    def _apply_2q(self, state, U, q1, q2, n):
-        state = state.reshape([2] * n)
-        state = np.moveaxis(state, [q1, q2], [0, 1])
-        shape = state.shape
-        state = U @ state.reshape(4, -1)
-        state = np.moveaxis(state.reshape(shape), [0, 1], [q1, q2])
-        return state.reshape(-1)
-
-    def _apply_kraus(self, state, kraus_ops, q, n):
-        probs = kraus_to_probs(kraus_ops)
-        idx = np.random.choice(len(kraus_ops), p=probs)
-        K_normalized = kraus_ops[idx] / np.sqrt(probs[idx])
-        return self._apply_1q(state, K_normalized, q, n)
-
-    def _build_obs(self, obs):
-        P = np.array([[1]], dtype=complex)
-        for c in obs:
-            P = np.kron(P, PAULI["IXYZ".index(c)])
-        return P
-
-    def _expectation(self, state, obs):
-        P = self._build_obs(obs) if isinstance(obs, str) else obs
-        return np.real(np.conj(state) @ P @ state)
-
-    def run(self, circuit, obs, init, insertions=None):
-        insertions = insertions or {}
-        state = init.copy()
-        n = circuit.n_qubits
-        for l, layer in enumerate(circuit.layers):
-            for gate in layer:
-                if isinstance(gate.content, np.ndarray):
-                    state = self._apply_1q(state, gate.content, gate.qubits[0], n)
-                else:
-                    U = self.gates[gate.content]
-                    state = self._apply_2q(state, U, gate.qubits[0], gate.qubits[1], n)
-                    if gate.content in self.noise:
-                        kraus1, kraus2 = self.noise[gate.content]
-                        state = self._apply_kraus(state, kraus1, gate.qubits[0], n)
-                        state = self._apply_kraus(state, kraus2, gate.qubits[1], n)
-                    for q in gate.qubits:
-                        if (l, q) in insertions:
-                            state = self._apply_1q(state, PAULI[insertions[(l, q)]], q, n)
-        return self._expectation(state, obs)
-
-    def ideal(self, circuit, obs, init):
-        state = init.copy()
-        n = circuit.n_qubits
-        for layer in circuit.layers:
-            for gate in layer:
-                if isinstance(gate.content, np.ndarray):
-                    state = self._apply_1q(state, gate.content, gate.qubits[0], n)
-                else:
-                    state = self._apply_2q(state, self.gates[gate.content], gate.qubits[0], gate.qubits[1], n)
-        return self._expectation(state, obs)
 
 def error_locations(circuit, noise_model):
     locs = []
@@ -183,7 +167,7 @@ def random_noise_model(rng, p_I_range=(0.85, 0.95), gate_names=None) -> dict[str
             p_X = rng.uniform(0, rest)
             p_Y = rng.uniform(0, rest - p_X)
             p_Z = rest - p_X - p_Y
-            kraus.append(pauli_kraus(np.array([p_I, p_X, p_Y, p_Z])))
+            kraus.append(pauli_to_kraus(np.array([p_I, p_X, p_Y, p_Z])))
         noise[gate] = tuple(kraus)
     return noise
 
@@ -197,9 +181,3 @@ def random_product_state(n_qubits, rng):
 def random_observable(n_qubits, rng):
     return ''.join(rng.choice(list('IXYZ')) for _ in range(n_qubits))
 
-if __name__ == "__main__":
-    rng = np.random.default_rng(42)
-    circuit = random_circuit(3, 2, rng)
-    noise = random_noise_model(rng)
-    sim = NoisySimulator(STANDARD_GATES, noise)
-    print(f"Shared module OK: {len(error_locations(circuit, noise))} error locations")
