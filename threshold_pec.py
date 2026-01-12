@@ -23,6 +23,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from rich import box
+from rich.console import Console
+from rich.table import Table
+
 from exp_window_pec import (
     exp_window_quasi_prob,
     qp_norm,
@@ -45,10 +49,26 @@ from pec_shared import (
     random_observable,
 )
 
-
-def h_exponential(weight: int, beta: float) -> float:
-    return float(np.exp(-beta * weight))
-
+CLIP_MIN = -20.0
+CLIP_MAX = 20.0
+SOFTPLUS_TAU_DEFAULT = 1.0
+MIN_SAMPLES = 1
+MIN_STD_SAMPLES = 2
+EPS_H_PROP = 1e-15
+EPS_ESS = 1e-12
+STD_DDOF = 1
+SEED_OFFSET_FULL = 1000
+SEED_OFFSET_EXP = 2000
+SEED_OFFSET_FILTERED = 3000
+QISKIT_METHOD = "statevector"
+DEFAULT_N_QUBITS = 4
+DEFAULT_DEPTH = 3
+DEFAULT_BETA_PROP = 0.15
+DEFAULT_BETA_THRESH = 0.2
+DEFAULT_N_SAMPLES = 100
+DEFAULT_N_TRIALS = 10
+DEFAULT_SEED = 42
+console = Console()
 
 def h_threshold(weight: int, beta: float, w0: int) -> float:
     if weight <= w0:
@@ -56,10 +76,10 @@ def h_threshold(weight: int, beta: float, w0: int) -> float:
     return float(np.exp(-beta * (weight - w0)))
 
 
-def h_softplus(weight: int, beta: float, w0: float, tau: float = 1.0) -> float:
+def h_softplus(weight: int, beta: float, w0: float, tau: float = SOFTPLUS_TAU_DEFAULT) -> float:
     x = (weight - w0) / tau
-    x = float(np.clip(x, -20.0, 20.0))
-    sp = np.log1p(np.exp(x)) if x <= 20.0 else x
+    x = float(np.clip(x, CLIP_MIN, CLIP_MAX))
+    sp = np.log1p(np.exp(x)) if x <= CLIP_MAX else x
     return float(np.exp(-beta * sp * tau))
 
 
@@ -71,61 +91,15 @@ def critical_beta(p: np.ndarray) -> float:
         return float("inf")
     return float(-np.log(min_eigenvalue))
 
-
-def _proposal_nonid_probs(error_locs: List[Tuple], beta_prop: float) -> np.ndarray:
-    if not error_locs:
-        return np.array([], dtype=float)
-    probs = []
-    for _, _, p in error_locs:
-        q = exp_window_quasi_prob(p, beta_prop)
-        g = qp_norm(q)
-        prob = np.abs(q) / g
-        probs.append(1.0 - float(prob[0]))
-    return np.array(probs, dtype=float)
-
-
-def _weight_pmf(p_nonid: np.ndarray) -> np.ndarray:
-    pmf = np.array([1.0], dtype=float)
-    for p in p_nonid:
-        nxt = np.zeros(pmf.size + 1, dtype=float)
-        nxt[:-1] += pmf * (1.0 - p)
-        nxt[1:] += pmf * p
-        pmf = nxt
-    return pmf
-
-
-def _expected_weight(p_nonid: np.ndarray) -> float:
-    return float(np.sum(p_nonid)) if p_nonid.size else 0.0
-
-
 def _resolve_w0(
-    w0: int,
     w0_density: Optional[float],
     n_locs: int,
-    w0_mode: str,
-    expected_weight: Optional[float],
-    p_nonid: Optional[np.ndarray],
 ) -> int:
     if w0_density is None:
-        return int(max(0, w0))
+        raise ValueError("threshold density must be provided")
     if w0_density < 0:
-        raise ValueError("w0_density must be non-negative")
-    if w0_mode == "expected":
-        scale = expected_weight if expected_weight is not None else float(n_locs)
-    elif w0_mode == "volume":
-        scale = float(n_locs)
-    elif w0_mode == "tail":
-        if w0_density > 1:
-            raise ValueError("w0_density must be <= 1 for w0_mode='tail'")
-        if p_nonid is None or p_nonid.size == 0:
-            return int(max(0, w0))
-        pmf = _weight_pmf(p_nonid)
-        cdf = np.cumsum(pmf)
-        target = max(0.0, 1.0 - w0_density)
-        scaled = int(np.searchsorted(cdf, target, side="left"))
-        return int(min(max(0, scaled), n_locs))
-    else:
-        raise ValueError(f"Unknown w0_mode: {w0_mode}")
+        raise ValueError("threshold density must be non-negative")
+    scale = float(n_locs)
     scaled = int(np.ceil(w0_density * scale))
     return int(min(max(0, scaled), n_locs))
 
@@ -161,9 +135,9 @@ def _resolve_filter(
 
 
 def _standard_error(values: np.ndarray) -> float:
-    if values.size < 2:
+    if values.size < MIN_STD_SAMPLES:
         return 0.0
-    return float(values.std(ddof=1)) / np.sqrt(values.size)
+    return float(values.std(ddof=STD_DDOF)) / np.sqrt(values.size)
 
 
 def _importance_sampling_estimate(
@@ -175,7 +149,7 @@ def _importance_sampling_estimate(
     rng: np.random.Generator,
     w0_value: Optional[int],
 ) -> ThresholdPECEstimate:
-    if n_samples <= 0:
+    if n_samples < MIN_SAMPLES:
         raise ValueError("n_samples must be positive")
 
     if not error_locs:
@@ -220,9 +194,9 @@ def _importance_sampling_estimate(
         measurement = float(measure_func(insertions))
         exp_val = sign * measurement
 
-        h_prop = h_exponential(weight, beta_prop)
+        h_prop = float(np.exp(-beta_prop * weight))
         h_targ = h_target(weight)
-        iw = h_targ / h_prop if h_prop > 1e-15 else 0.0
+        iw = h_targ / h_prop if h_prop > EPS_H_PROP else 0.0
 
         exp_estimates[i] = exp_val
         target_estimates[i] = iw * exp_val
@@ -236,7 +210,7 @@ def _importance_sampling_estimate(
 
     iw_mean = float(np.mean(importance_weights))
     iw_var = float(np.var(importance_weights))
-    ess = n_samples / (1.0 + iw_var / (iw_mean ** 2)) if iw_mean > 1e-12 else 0.0
+    ess = n_samples / (1.0 + iw_var / (iw_mean ** 2)) if iw_mean > EPS_ESS else 0.0
 
     above_frac = float(np.mean(sample_weights > w0_value)) if w0_value is not None else float("nan")
 
@@ -247,7 +221,7 @@ def _importance_sampling_estimate(
         effective_samples=float(ess),
         n_samples=n_samples,
         weight_mean=float(sample_weights.mean()),
-        weight_std=float(sample_weights.std(ddof=1)) if n_samples > 1 else 0.0,
+        weight_std=float(sample_weights.std(ddof=STD_DDOF)) if n_samples >= MIN_STD_SAMPLES else 0.0,
         weight_above_frac=above_frac,
         exp_mean=exp_mean,
         exp_std=exp_std,
@@ -260,23 +234,17 @@ def threshold_pec_estimate(
     observable: str,
     initial_state: np.ndarray,
     error_locs: List[Tuple],
-    w0: int,
     beta_prop: float,
     beta_thresh: float,
     n_samples: int,
     seed: int = 0,
     filter_type: str = "threshold",
-    softplus_tau: float = 1.0,
+    softplus_tau: float = SOFTPLUS_TAU_DEFAULT,
     h_target: Optional[Callable[[int], float]] = None,
-    w0_density: Optional[float] = None,
-    w0_mode: str = "expected",
+    w0_density: float = 0.30,
 ) -> ThresholdPECEstimate:
     rng = np.random.default_rng(seed)
-    p_nonid = _proposal_nonid_probs(error_locs, beta_prop)
-    expected_weight = _expected_weight(p_nonid)
-    w0_value = _resolve_w0(
-        w0, w0_density, len(error_locs), w0_mode, expected_weight, p_nonid
-    )
+    w0_value = _resolve_w0(w0_density, len(error_locs))
     h_fn = _resolve_filter(filter_type, w0_value, beta_thresh, softplus_tau, h_target)
 
     def measure(insertions: Dict[Tuple[int, int], int]) -> float:
@@ -293,46 +261,39 @@ def threshold_pec_qiskit(
     initial_state: np.ndarray,
     noise: dict,
     error_locs: List[Tuple],
-    w0: int,
     beta_prop: float,
     beta_thresh: float,
     n_samples: int,
     seed: int = 0,
     filter_type: str = "threshold",
-    softplus_tau: float = 1.0,
+    softplus_tau: float = SOFTPLUS_TAU_DEFAULT,
     h_target: Optional[Callable[[int], float]] = None,
-    w0_density: Optional[float] = None,
-    w0_mode: str = "expected",
+    w0_density: float = 0.30,
 ) -> ThresholdPECEstimate:
     rng = np.random.default_rng(seed)
-    p_nonid = _proposal_nonid_probs(error_locs, beta_prop)
-    expected_weight = _expected_weight(p_nonid)
-    w0_value = _resolve_w0(
-        w0, w0_density, len(error_locs), w0_mode, expected_weight, p_nonid
-    )
+    w0_value = _resolve_w0(w0_density, len(error_locs))
     h_fn = _resolve_filter(filter_type, w0_value, beta_thresh, softplus_tau, h_target)
 
-    QuantumCircuit, UnitaryGate, Pauli, DensityMatrix, Kraus, AerSimulator = _require_qiskit()
+    QuantumCircuit, UnitaryGate, Operator, Pauli, Statevector, Kraus, AerSimulator = _require_qiskit()
     init_sv = _to_qiskit_statevector(initial_state, circuit.n_qubits)
-    init_density = DensityMatrix(init_sv)
-    pauli_obs = Pauli(observable[::-1])
+    pauli_obs = Operator(Pauli(observable[::-1]))
     noise_instr = _qiskit_noise_instructions(noise, Kraus)
-    backend = AerSimulator(method="density_matrix")
+    backend = AerSimulator(method=QISKIT_METHOD)
 
     def measure(insertions: Dict[Tuple[int, int], int]) -> float:
         qc = _build_qiskit_circuit(
             circuit=circuit,
-            init_density=init_density,
+            init_statevector=init_sv,
             noise_instr=noise_instr,
             insertions=insertions,
             QuantumCircuit=QuantumCircuit,
             UnitaryGate=UnitaryGate,
         )
-        qc.save_density_matrix()
-        result = backend.run(qc).result()
-        rho = result.data(0)["density_matrix"]
-        dm = DensityMatrix(rho)
-        return float(np.real(dm.expectation_value(pauli_obs)))
+        qc.save_statevector()
+        result = backend.run(qc, shots=1).result()
+        state = result.data(0)["statevector"]
+        sv = state if isinstance(state, Statevector) else Statevector(state)
+        return float(np.real(sv.expectation_value(pauli_obs)))
 
     return _importance_sampling_estimate(
         measure, error_locs, beta_prop, h_fn, n_samples, rng, w0_value
@@ -342,17 +303,15 @@ def threshold_pec_qiskit(
 def benchmark(
     n_qubits: int,
     depth: int,
-    w0: int,
     beta_prop: float,
     beta_thresh: float,
     n_samples: int,
     n_trials: int,
     seed: int,
     filter_type: str = "threshold",
-    softplus_tau: float = 1.0,
+    softplus_tau: float = SOFTPLUS_TAU_DEFAULT,
     use_qiskit: bool = False,
-    w0_density: Optional[float] = None,
-    w0_mode: str = "volume",
+    w0_density: float = 0.30,
 ) -> Dict:
     results = {
         "full_pec": [],
@@ -362,8 +321,6 @@ def benchmark(
     ideals = []
 
     w0_values: List[int] = []
-    expected_weights: List[float] = []
-    tail_targets: List[float] = []
     for t in range(n_trials):
         rng = np.random.default_rng(seed + t)
         circuit = random_circuit(n_qubits, depth, rng)
@@ -371,14 +328,8 @@ def benchmark(
         init = random_product_state(n_qubits, rng)
         obs = random_observable(n_qubits, rng)
         locs = error_locations(circuit, noise)
-        p_nonid = _proposal_nonid_probs(locs, beta_prop)
-        expected_weight = _expected_weight(p_nonid)
-        expected_weights.append(expected_weight)
-        w0_value = _resolve_w0(
-            w0, w0_density, len(locs), w0_mode, expected_weight, p_nonid
-        )
+        w0_value = _resolve_w0(w0_density, len(locs))
         w0_values.append(w0_value)
-        tail_targets.append(float(w0_density) if w0_mode == "tail" and w0_density is not None else float("nan"))
 
         sim = NoisySimulator(STANDARD_GATES, noise)
         ideal = sim.ideal(circuit, obs, init)
@@ -386,10 +337,24 @@ def benchmark(
 
         if use_qiskit:
             est_full = pec_estimate_qiskit(
-                circuit, obs, init, noise, locs, beta=0.0, n_samples=n_samples, seed=seed + 1000 * t
+                circuit,
+                obs,
+                init,
+                noise,
+                locs,
+                beta=0.0,
+                n_samples=n_samples,
+                seed=seed + SEED_OFFSET_FULL * t,
             )
             est_exp = pec_estimate_qiskit(
-                circuit, obs, init, noise, locs, beta=beta_prop, n_samples=n_samples, seed=seed + 2000 * t
+                circuit,
+                obs,
+                init,
+                noise,
+                locs,
+                beta=beta_prop,
+                n_samples=n_samples,
+                seed=seed + SEED_OFFSET_EXP * t,
             )
             est_filtered = threshold_pec_qiskit(
                 circuit,
@@ -397,21 +362,34 @@ def benchmark(
                 init,
                 noise,
                 locs,
-                w0=w0_value,
                 beta_prop=beta_prop,
                 beta_thresh=beta_thresh,
                 n_samples=n_samples,
-                seed=seed + 3000 * t,
+                seed=seed + SEED_OFFSET_FILTERED * t,
                 filter_type=filter_type,
                 softplus_tau=softplus_tau,
-                w0_mode=w0_mode,
+                w0_density=w0_density,
             )
         else:
             est_full = pec_estimate(
-                sim, circuit, obs, init, locs, beta=0.0, n_samples=n_samples, seed=seed + 1000 * t
+                sim,
+                circuit,
+                obs,
+                init,
+                locs,
+                beta=0.0,
+                n_samples=n_samples,
+                seed=seed + SEED_OFFSET_FULL * t,
             )
             est_exp = pec_estimate(
-                sim, circuit, obs, init, locs, beta=beta_prop, n_samples=n_samples, seed=seed + 2000 * t
+                sim,
+                circuit,
+                obs,
+                init,
+                locs,
+                beta=beta_prop,
+                n_samples=n_samples,
+                seed=seed + SEED_OFFSET_EXP * t,
             )
             est_filtered = threshold_pec_estimate(
                 sim,
@@ -419,14 +397,13 @@ def benchmark(
                 obs,
                 init,
                 locs,
-                w0=w0_value,
                 beta_prop=beta_prop,
                 beta_thresh=beta_thresh,
                 n_samples=n_samples,
-                seed=seed + 3000 * t,
+                seed=seed + SEED_OFFSET_FILTERED * t,
                 filter_type=filter_type,
                 softplus_tau=softplus_tau,
-                w0_mode=w0_mode,
+                w0_density=w0_density,
             )
 
         results["full_pec"].append(
@@ -453,14 +430,10 @@ def benchmark(
         "config": {
             "n_qubits": n_qubits,
             "depth": depth,
-            "w0": w0,
             "w0_density": w0_density,
-            "w0_mode": w0_mode,
             "w0_mean": float(np.mean(w0_values)) if w0_values else 0.0,
             "w0_min": int(min(w0_values)) if w0_values else 0,
             "w0_max": int(max(w0_values)) if w0_values else 0,
-            "expected_weight_mean": float(np.mean(expected_weights)) if expected_weights else 0.0,
-            "tail_target": float(np.mean(tail_targets)) if tail_targets else float("nan"),
             "beta_prop": beta_prop,
             "beta_thresh": beta_thresh,
             "n_samples": n_samples,
@@ -479,27 +452,28 @@ def print_benchmark_results(data: Dict) -> None:
     if config["filter_type"] == "softplus":
         label = f"softplus τ={config['softplus_tau']}"
 
-    w0_label = f"w0={config['w0']}"
-    if config.get("w0_density") is not None:
-        exp_label = ""
-        if config.get("w0_mode") == "expected":
-            exp_label = f", E[w]≈{config.get('expected_weight_mean', 0.0):.1f}"
-        if config.get("w0_mode") == "tail":
-            exp_label = f", target p_gt_w0≈{config.get('tail_target', 0.0):.2f}"
-        w0_label = (
-            f"w0≈{config['w0_mean']:.1f} "
-            f"(ρ={config['w0_density']}, range {config['w0_min']}-{config['w0_max']}{exp_label})"
-        )
-        w0_label = f"{w0_label}, mode={config.get('w0_mode', 'expected')}"
+    w0_label = (
+        f"w0≈{config['w0_mean']:.1f} "
+        f"(ρ={config['w0_density']}, range {config['w0_min']}-{config['w0_max']})"
+    )
 
-    print(
-        f"\nConfig: {config['n_qubits']}q, depth={config['depth']}, {w0_label}, "
+    console.rule("Threshold PEC Results")
+    console.print(
+        f"Config: {config['n_qubits']}q, depth={config['depth']}, {w0_label}, "
         f"β_prop={config['beta_prop']}, β_thresh={config['beta_thresh']}, filter={label}"
     )
-    print(f"Samples: {config['n_samples']}, Trials: {config['n_trials']}, Qiskit={config['use_qiskit']}")
+    console.print(
+        f"Samples: {config['n_samples']}, Trials: {config['n_trials']}, Qiskit={config['use_qiskit']}"
+    )
 
-    print(f"\n{'Method':<20} {'qp_norm':>8} {'Bias':>10} {'RMSE':>10} {'ESS':>10} {'w_mean':>8} {'p_gt_w0':>8}")
-    print("-" * 78)
+    table = Table(box=box.ASCII)
+    table.add_column("Method")
+    table.add_column("qp_norm", justify="right")
+    table.add_column("Bias", justify="right")
+    table.add_column("RMSE", justify="right")
+    table.add_column("ESS", justify="right")
+    table.add_column("w_mean", justify="right")
+    table.add_column("p_gt_w0", justify="right")
 
     for method in ["full_pec", "exp_window", "filtered"]:
         data_m = results[method]
@@ -515,46 +489,52 @@ def print_benchmark_results(data: Dict) -> None:
             name = label
             w_mean = float(np.mean([d.get("weight_mean") for d in data_m if "weight_mean" in d]))
             above = float(np.mean([d.get("above") for d in data_m if "above" in d]))
-            print(
-                f"{name:<20} {mean_qp_norm:>8.2f} {bias:>10.4f} {rmse:>10.4f} {ess:>10.1f} "
-                f"{w_mean:>8.2f} {above:>8.2f}"
+            table.add_row(
+                name,
+                f"{mean_qp_norm:.2f}",
+                f"{bias:.4f}",
+                f"{rmse:.4f}",
+                f"{ess:.1f}",
+                f"{w_mean:.2f}",
+                f"{above:.2f}",
             )
         else:
             name = "full_pec" if method == "full_pec" else "exp_window"
-            print(
-                f"{name:<20} {mean_qp_norm:>8.2f} {bias:>10.4f} {rmse:>10.4f} "
-                f"{'N/A':>10} {'-':>8} {'-':>8}"
+            table.add_row(
+                name,
+                f"{mean_qp_norm:.2f}",
+                f"{bias:.4f}",
+                f"{rmse:.4f}",
+                "N/A",
+                "-",
+                "-",
             )
+
+    console.print(table)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Threshold Filter PEC via Importance Sampling")
-    parser.add_argument("--n-qubits", type=int, default=4)
-    parser.add_argument("--depth", type=int, default=3)
-    parser.add_argument("--w0", type=int, default=2)
-    parser.add_argument("--w0-density", type=float, default=None,
+    parser.add_argument("--n-qubits", type=int, default=DEFAULT_N_QUBITS)
+    parser.add_argument("--depth", type=int, default=DEFAULT_DEPTH)
+    parser.add_argument("--threshold-density", type=float, default=0.30,
                         help="Relative threshold density (w0 = ceil(rho * n_locs))")
-    parser.add_argument("--w0-mode", choices=["volume", "expected", "tail"], default="volume",
-                        help="Scale w0 by volume or expected weight under proposal.")
-    parser.add_argument("--beta-prop", type=float, default=0.15)
-    parser.add_argument("--beta-thresh", type=float, default=0.2)
+    parser.add_argument("--beta-prop", type=float, default=DEFAULT_BETA_PROP)
+    parser.add_argument("--beta-thresh", type=float, default=DEFAULT_BETA_THRESH)
     parser.add_argument("--filter-type", choices=["threshold", "softplus"], default="threshold")
-    parser.add_argument("--softplus-tau", type=float, default=1.0)
-    parser.add_argument("--n-samples", type=int, default=100)
-    parser.add_argument("--n-trials", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--softplus-tau", type=float, default=SOFTPLUS_TAU_DEFAULT)
+    parser.add_argument("--n-samples", type=int, default=DEFAULT_N_SAMPLES)
+    parser.add_argument("--n-trials", type=int, default=DEFAULT_N_TRIALS)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--no-qiskit", action="store_true", help="Disable Qiskit simulation")
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("THRESHOLD FILTER PEC VIA IMPORTANCE SAMPLING")
-    print("=" * 60)
+    console.rule("THRESHOLD FILTER PEC VIA IMPORTANCE SAMPLING")
 
     t0 = time.time()
     data = benchmark(
         n_qubits=args.n_qubits,
         depth=args.depth,
-        w0=args.w0,
         beta_prop=args.beta_prop,
         beta_thresh=args.beta_thresh,
         n_samples=args.n_samples,
@@ -563,12 +543,11 @@ def main() -> None:
         filter_type=args.filter_type,
         softplus_tau=args.softplus_tau,
         use_qiskit=not args.no_qiskit,
-        w0_density=args.w0_density,
-        w0_mode=args.w0_mode,
+        w0_density=args.threshold_density,
     )
 
     print_benchmark_results(data)
-    print(f"\nTotal time: {time.time() - t0:.1f}s")
+    console.print(f"Total time: {time.time() - t0:.1f}s")
 
     filtered = data["results"]["filtered"]
     exp_results = data["results"]["exp_window"]
@@ -578,15 +557,23 @@ def main() -> None:
     exp_rmse = np.sqrt(np.mean([d["error"] ** 2 for d in exp_results]))
     full_rmse = np.sqrt(np.mean([d["error"] ** 2 for d in full_results]))
 
-    print("\n" + "=" * 60)
-    print("ANALYSIS")
-    print("=" * 60)
-    print(
-        f"\nRMSE Comparison:\n"
-        f"  Full PEC:     {full_rmse:.4f}\n"
-        f"  Exponential:  {exp_rmse:.4f}  ({100 * (exp_rmse / full_rmse - 1):+.1f}% vs Full)\n"
-        f"  Filtered:     {filtered_rmse:.4f}  ({100 * (filtered_rmse / full_rmse - 1):+.1f}% vs Full)\n"
+    console.rule("ANALYSIS")
+    table = Table(box=box.ASCII)
+    table.add_column("Method")
+    table.add_column("RMSE", justify="right")
+    table.add_column("vs Full", justify="right")
+    table.add_row("Full PEC", f"{full_rmse:.4f}", "baseline")
+    table.add_row(
+        "Exponential",
+        f"{exp_rmse:.4f}",
+        f"{100.0 * (exp_rmse / full_rmse - 1):+.1f}%",
     )
+    table.add_row(
+        "Filtered",
+        f"{filtered_rmse:.4f}",
+        f"{100.0 * (filtered_rmse / full_rmse - 1):+.1f}%",
+    )
+    console.print(table)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,20 @@ from pec_shared import (
     ETA, NoisySimulator, Circuit
 )
 
+from rich import box
+from rich.console import Console
+from rich.table import Table
+
+DIRECT_STATEVECTOR_QUBITS_MAX = 1
+QISKIT_METHOD = "statevector"
+console = Console()
+VERIFY_TEST_CASES = (
+    ("Depolarizing 5%", np.array([0.95, 0.05 / 3, 0.05 / 3, 0.05 / 3])),
+    ("Depolarizing 10%", np.array([0.90, 0.10 / 3, 0.10 / 3, 0.10 / 3])),
+    ("Asymmetric", np.array([0.90, 0.05, 0.03, 0.02])),
+    ("Z-dominated", np.array([0.85, 0.02, 0.03, 0.10])),
+)
+
 
 # =============================================================================
 # EXPONENTIAL WINDOW FILTER
@@ -44,12 +58,19 @@ def exp_window_quasi_prob(p: np.ndarray, beta: float) -> np.ndarray:
     eigenvalues = ETA @ p  # (η·p)[σ] for σ ∈ {0,1,2,3}
     
     decay = np.exp(-beta)
-    h = np.array([1.0 / eigenvalues[0],           # σ=0: no suppression
-                  decay / eigenvalues[1],          # σ=1: suppressed
-                  decay / eigenvalues[2],          # σ=2: suppressed
-                  decay / eigenvalues[3]])         # σ=3: suppressed
-    
+    h = np.array([
+        1.0 / eigenvalues[0],  # σ=0: no suppression
+        decay / eigenvalues[1],  # σ=1: suppressed
+        decay / eigenvalues[2],  # σ=2: suppressed
+        decay / eigenvalues[3],  # σ=3: suppressed
+    ])
+
     return 0.25 * (ETA @ h)
+
+
+def qp_norm(q: np.ndarray) -> float:
+    """Sampling overhead qp_norm = ||q||₁"""
+    return np.abs(q).sum()
 
 # =============================================================================
 # PEC ESTIMATOR
@@ -104,7 +125,7 @@ def pec_estimate(
     local_q = [exp_window_quasi_prob(p, beta) for (_, _, p) in error_locs]
     
     # Total qp_norm = Π_v ||q_v||₁
-    local_qp_norm = [np.abs(q).sum() for q in local_q]
+    local_qp_norm = [qp_norm(q) for q in local_q]
     total_qp_norm = np.prod(local_qp_norm)
     
     # Sampling distributions: π_v[s] = |q_v[s]| / qp_norm_v
@@ -142,17 +163,17 @@ def _require_qiskit():
     try:
         from qiskit import QuantumCircuit
         from qiskit.circuit.library import UnitaryGate
-        from qiskit.quantum_info import Pauli, DensityMatrix, Kraus
+        from qiskit.quantum_info import Operator, Pauli, Statevector, Kraus
         from qiskit_aer import AerSimulator
     except Exception as exc:
         raise ImportError(
             "Qiskit and qiskit-aer are required for Qiskit simulation."
         ) from exc
-    return QuantumCircuit, UnitaryGate, Pauli, DensityMatrix, Kraus, AerSimulator
+    return QuantumCircuit, UnitaryGate, Operator, Pauli, Statevector, Kraus, AerSimulator
 
 
 def _to_qiskit_statevector(state: np.ndarray, n_qubits: int) -> np.ndarray:
-    if n_qubits <= 1:
+    if n_qubits <= DIRECT_STATEVECTOR_QUBITS_MAX:
         return state.copy()
     reshaped = state.reshape([2] * n_qubits)
     return reshaped.transpose(list(reversed(range(n_qubits)))).reshape(-1)
@@ -170,7 +191,7 @@ def _qiskit_noise_instructions(noise: dict, Kraus):
 
 def _build_qiskit_circuit(
     circuit: Circuit,
-    init_density,
+    init_statevector,
     noise_instr: dict,
     insertions: dict,
     QuantumCircuit,
@@ -178,7 +199,7 @@ def _build_qiskit_circuit(
 ):
     n = circuit.n_qubits
     qc = QuantumCircuit(n)
-    qc.set_density_matrix(init_density)
+    qc.set_statevector(init_statevector)
 
     for l, layer in enumerate(circuit.layers):
         for gate in layer:
@@ -230,28 +251,27 @@ def noisy_expectation_qiskit(
     """
     Noisy expectation value using Qiskit simulation (no PEC insertions).
     """
-    QuantumCircuit, UnitaryGate, Pauli, DensityMatrix, Kraus, AerSimulator = _require_qiskit()
+    QuantumCircuit, UnitaryGate, Operator, Pauli, Statevector, Kraus, AerSimulator = _require_qiskit()
 
     init_state = _to_qiskit_statevector(initial_state, circuit.n_qubits)
-    init_density = DensityMatrix(init_state)
-    pauli_obs = Pauli(observable[::-1])
+    pauli_obs = Operator(Pauli(observable[::-1]))
     noise_instr = _qiskit_noise_instructions(noise, Kraus)
-    backend = AerSimulator(method="density_matrix")
+    backend = AerSimulator(method=QISKIT_METHOD)
 
     qc = _build_qiskit_circuit(
         circuit=circuit,
-        init_density=init_density,
+        init_statevector=init_state,
         noise_instr=noise_instr,
         insertions={},
         QuantumCircuit=QuantumCircuit,
         UnitaryGate=UnitaryGate,
     )
-    qc.save_density_matrix()
+    qc.save_statevector()
 
-    result = backend.run(qc).result()
-    rho = result.data(0)["density_matrix"]
-    dm = DensityMatrix(rho)
-    return float(np.real(dm.expectation_value(pauli_obs)))
+    result = backend.run(qc, shots=1).result()
+    state = result.data(0)["statevector"]
+    sv = state if isinstance(state, Statevector) else Statevector(state)
+    return float(np.real(sv.expectation_value(pauli_obs)))
 
 
 def pec_estimate_qiskit(
@@ -267,20 +287,19 @@ def pec_estimate_qiskit(
     """
     PEC estimation with exponential window filter using Qiskit simulation.
     """
-    QuantumCircuit, UnitaryGate, Pauli, DensityMatrix, Kraus, AerSimulator = _require_qiskit()
+    QuantumCircuit, UnitaryGate, Operator, Pauli, Statevector, Kraus, AerSimulator = _require_qiskit()
 
     rng = np.random.default_rng(seed)
     local_q = [exp_window_quasi_prob(p, beta) for (_, _, p) in error_locs]
-    local_qp_norm = [np.abs(q).sum() for q in local_q]
+    local_qp_norm = [qp_norm(q) for q in local_q]
     total_qp_norm = np.prod(local_qp_norm)
     sampling_probs = [np.abs(q) / g for q, g in zip(local_q, local_qp_norm)]
     sampling_signs = [np.sign(q) for q in local_q]
 
     init_state = _to_qiskit_statevector(initial_state, circuit.n_qubits)
-    init_density = DensityMatrix(init_state)
-    pauli_obs = Pauli(observable[::-1])
+    pauli_obs = Operator(Pauli(observable[::-1]))
     noise_instr = _qiskit_noise_instructions(noise, Kraus)
-    backend = AerSimulator(method="density_matrix")
+    backend = AerSimulator(method=QISKIT_METHOD)
 
     estimates = np.empty(n_samples)
     for i in range(n_samples):
@@ -293,18 +312,18 @@ def pec_estimate_qiskit(
 
         qc = _build_qiskit_circuit(
             circuit=circuit,
-            init_density=init_density,
+            init_statevector=init_state,
             noise_instr=noise_instr,
             insertions=insertions,
             QuantumCircuit=QuantumCircuit,
             UnitaryGate=UnitaryGate,
         )
-        qc.save_density_matrix()
+        qc.save_statevector()
 
-        result = backend.run(qc).result()
-        rho = result.data(0)["density_matrix"]
-        dm = DensityMatrix(rho)
-        estimates[i] = sign * np.real(dm.expectation_value(pauli_obs))
+        result = backend.run(qc, shots=1).result()
+        state = result.data(0)["statevector"]
+        sv = state if isinstance(state, Statevector) else Statevector(state)
+        estimates[i] = sign * np.real(sv.expectation_value(pauli_obs))
 
     mean = total_qp_norm * estimates.mean()
     std = total_qp_norm * estimates.std() / np.sqrt(n_samples)
@@ -317,18 +336,13 @@ def pec_estimate_qiskit(
 
 def verify_beta_zero_is_full_pec():
     """Verify that β=0 recovers full PEC quasi-probabilities."""
-    print("Verification: β=0 equals Full PEC")
-    print("=" * 50)
-    
-    # Test with various noise configurations
-    test_cases = [
-        ("Depolarizing 5%", np.array([0.95, 0.05/3, 0.05/3, 0.05/3])),
-        ("Depolarizing 10%", np.array([0.90, 0.10/3, 0.10/3, 0.10/3])),
-        ("Asymmetric", np.array([0.90, 0.05, 0.03, 0.02])),
-        ("Z-dominated", np.array([0.85, 0.02, 0.03, 0.10])),
-    ]
-    
-    for name, p in test_cases:
+    console.rule("Verification: β=0 equals Full PEC")
+    table = Table(box=box.ASCII)
+    table.add_column("Case")
+    table.add_column("max|diff|", justify="right")
+    table.add_column("Status", justify="center")
+
+    for name, p in VERIFY_TEST_CASES:
         # Full PEC: q = (1/4) η · (1/(η·p))
         eigenvalues = ETA @ p
         q_full = 0.25 * (ETA @ (1.0 / eigenvalues))
@@ -338,10 +352,10 @@ def verify_beta_zero_is_full_pec():
         
         # Check equality
         diff = np.abs(q_full - q_exp0).max()
-        status = "✓" if diff < 1e-14 else "✗"
-        print(f"{status} {name}: max|diff| = {diff:.2e}")
-    
-    print()
+        status = "OK" if diff < 1e-14 else "FAIL"
+        table.add_row(name, f"{diff:.2e}", status)
+
+    console.print(table)
 
 if __name__ == "__main__":
     verify_beta_zero_is_full_pec()
