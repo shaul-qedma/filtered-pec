@@ -6,22 +6,30 @@ Simulation backend abstraction for PEC.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any, TYPE_CHECKING, cast
 
 import numpy as np
 
 from constants import DEFAULT_BATCH_SIZE
 from pec_shared import Circuit, Gate
 
-try:
-    import cirq
-except ImportError:  # pragma: no cover - optional dependency
-    cirq = None  # type: ignore[assignment]
+if TYPE_CHECKING:
+    import stim as stim_types
+    StimCircuit = stim_types.Circuit
+else:
+    StimCircuit = Any
 
 try:
-    import stim  # type: ignore
+    import cirq as _cirq
 except ImportError:  # pragma: no cover - optional dependency
-    stim = None  # type: ignore[assignment]
+    _cirq = None
+cirq = cast(Any, _cirq)
+
+try:
+    import stim as _stim  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    _stim = None
+stim = cast(Any, _stim)
 
 try:
     from qiskit import QuantumCircuit
@@ -320,7 +328,7 @@ class StimClifford(Backend):
     def __init__(self):
         if stim is None:
             raise ImportError("stim required. Install with: uv add stim")
-        self._gate_cache: Dict[Tuple[str, Tuple[int, ...]], "stim.Circuit"] = {}
+        self._gate_cache: Dict[Tuple[str, Tuple[int, ...]], StimCircuit] = {}
 
     def _gate_circuit(self, op: str, targets: Tuple[int, ...]):
         key = (op, targets)

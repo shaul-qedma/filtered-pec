@@ -1,6 +1,6 @@
 # Quick Clifford sweep for fast sanity checks.
 filter_type: threshold
-n_samples: 1000
+n_samples: 500
 n_trials: 2
 seed: 42
 progress: true
@@ -15,10 +15,10 @@ batch_size: 1
 n_qubits: 6
 depth: 200
 
-w0_densities: [0.40]
-beta_props: [0.15]
-beta_threshes: [0.15]
-softplus_taus: [1.0]
+w0_densities: [0.4]
+beta_props: [0.05]
+beta_threshes: [0.05]
+softplus_taus: [1]
 
 circuit_config:
   circuit_type: clifford

@@ -1,5 +1,5 @@
 filter_type: threshold
-n_samples: 200
+n_samples: 500
 n_trials: 6
 seed: 42
 progress: true
@@ -11,8 +11,8 @@ backend: stim
 backend_threads: 0
 batch_size: 1
 
-n_qubits: 8
-depth: 1000
+n_qubits: 6
+depth: 200
 
 w0_densities: [0.30, 0.40, 0.50]
 beta_props: [0.10, 0.15, 0.20]

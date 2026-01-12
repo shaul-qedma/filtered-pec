@@ -8,19 +8,19 @@ Uses Stim for Pauli propagation and stabilizer expectations.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Any, Iterable, List, Optional, Set, Tuple, cast
 
 import numpy as np
 
 from pec_shared import Circuit, Gate, CLIFFORD_2Q_GATES, error_locations
 
 
-def _require_stim():
+def _require_stim() -> Any:
     try:
         import stim  # type: ignore
     except ImportError as exc:
         raise ImportError("stim required for Clifford utilities. Install with: pip install stim") from exc
-    return stim
+    return cast(Any, stim)
 
 
 def _matrix_key(mat: np.ndarray) -> Tuple[float, ...]:
